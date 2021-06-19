@@ -57,6 +57,10 @@ func (bp BlockPos) Offset() (offset int64) {
 	return int64(bp) >> 8
 }
 
+func (bp BlockPos) Start() (offset int64) {
+	return int64(bp) >> 8
+}
+
 func (bp BlockPos) Size() (size int64) {
 	return BlockSize_1K * int64(math.Pow(2, float64(byte(bp))))
 }

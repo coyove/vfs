@@ -35,7 +35,7 @@ func TestConst(t *testing.T) {
 	// bp := NewBlockPos(10, BlockSize_16M)
 	// t.Log(bp.SplitToSize(BlockSize_1K * 4))
 	run(t, 0)
-	run(t, 5)
+	// run(t, 5)
 }
 
 func run(t *testing.T, v int) {
@@ -44,7 +44,9 @@ func run(t *testing.T, v int) {
 	os.MkdirAll("test", 0777)
 
 	p, _ := Open("test")
+	defer p.Close()
 	fmt.Println(p.Stat())
+	// return
 	// p.ForEach(func(k Meta, r io.Reader) error {
 	// 	buf, _ := ioutil.ReadAll(r)
 	// 	fmt.Println(k.Name, k.Positions, len(buf))
@@ -108,6 +110,4 @@ func run(t *testing.T, v int) {
 			t.Fatal(k, len(buf1), len(buf2))
 		}
 	}
-
-	p.Close()
 }

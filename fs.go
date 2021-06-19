@@ -57,68 +57,81 @@ func (p *Package) Close() error {
 }
 
 func (p *Package) writeData(buf []byte, bp BlockPos, padSize bool) error {
-	_, err := p.data.Seek(bp.Offset(), 0)
-	if err != nil {
+	if _, err := p.data.Seek(bp.Offset(), 0); err != nil {
 		return err
 	}
+
 	if testFlagSimulateDataWriteError > 0 && rand.Intn(testFlagSimulateDataWriteError) == 0 {
 		x := buf[:rand.Intn(len(buf))]
 		fmt.Println("test flag: simulate data write error", bp, "size=", len(buf), "write=", len(x))
 		p.data.Write(x)
 		return fmt.Errorf("testable")
 	}
+
 	n, err := p.data.Write(buf)
-	if err != nil {
-		return err
+	if err != nil || n != len(buf) {
+		return fmt.Errorf("write data: %v, written: %v", err, n)
 	}
-	if n != len(buf) {
-		return io.ErrShortWrite
-	}
-	if !padSize {
-		return nil
-	}
-	if n == int(bp.Size()) {
-		return nil
-	}
-	paddings := make([]byte, bp.Size()-int64(n))
-	n, err = p.data.Write(paddings)
-	if err != nil {
-		return err
-	}
-	if n != len(paddings) {
-		return io.ErrShortWrite
+
+	if padSize && n < int(bp.Size()) {
+		paddings := make([]byte, bp.Size()-int64(n))
+		n, err = p.data.Write(paddings)
+		if err != nil || n != len(paddings) {
+			return fmt.Errorf("write paddings: %v, written: %v", err, n)
+		}
 	}
 	return nil
 }
 
-func (p *Package) putData(tx *bbolt.Tx, buf []byte) (BlockPos, error) {
+func (p *Package) putData(tx *bbolt.Tx, buf []byte) ([]BlockPos, error) {
 	sz := int64(len(buf))
+	downSearched := false
 	assert(sz <= BlockSize_16M)
+	// Search upwards for free blocks
 	for bsz := roundSizeToBlock(sz); bsz <= BlockSize_16M; bsz *= 2 {
 		bk := tx.Bucket([]byte("holes_" + strconv.FormatInt(bsz, 10)))
 		k, _ := bk.Cursor().First()
 		if len(k) == 8 {
 			bp := unmarshalBlockPos(k)
 			if err := bk.Delete(k); err != nil {
-				return 0, err
+				return nil, err
 			}
 			bp1, bps := bp.SplitToSize(bsz)
 			bp = bp1
 			for _, bp := range bps {
 				if err := bp.putIntoHole(tx); err != nil {
-					return 0, err
+					return nil, err
 				}
 			}
-			return bp, p.writeData(buf, bp, false)
+			return []BlockPos{bp}, p.writeData(buf, bp, false)
+		}
+		// Search downwards if it is a relatively big block (>1M)
+		if !downSearched {
+			if bsz := roundSizeToBlock(sz); bsz > BlockSize_1K*1024 {
+				bsz /= 2
+				bk := tx.Bucket([]byte("holes_" + strconv.FormatInt(bsz, 10)))
+				if bk.Stats().KeyN >= 1 {
+					a, err := p.putData(tx, buf[:bsz])
+					if err != nil {
+						return nil, err
+					}
+					b, err := p.putData(tx, buf[bsz:])
+					if err != nil {
+						return nil, err
+					}
+					return append(a, b...), nil
+				}
+			}
+			downSearched = true
 		}
 	}
 	// No free blocks, create one at the end of data file
 	fi, err := p.data.Seek(0, 2)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	bp := NewBlockPos(fi, roundSizeToBlock(sz))
-	return bp, p.writeData(buf, bp, true)
+	return []BlockPos{bp}, p.writeData(buf, bp, true)
 }
 
 func (p *Package) ReadAll(key string) ([]byte, error) {
@@ -129,7 +142,7 @@ func (p *Package) ReadAll(key string) ([]byte, error) {
 	return r.ReadAll()
 }
 
-func (p *Package) Read(key string) (*ReadCloser, error) {
+func (p *Package) Meta(key string) (Meta, error) {
 	var m Meta
 	keybuf := []byte(key)
 	err := p.db.View(func(tx *bbolt.Tx) error {
@@ -141,15 +154,22 @@ func (p *Package) Read(key string) (*ReadCloser, error) {
 		m = unmarshalMeta(metabuf)
 		return nil
 	})
+	return m, err
+}
+
+func (p *Package) Read(key string) (*ReadCloser, error) {
+	m, err := p.Meta(key)
 	if err != nil {
 		return nil, err
 	}
-	readers := []io.Reader{}
+
 	f, err := os.OpenFile(p.data.Name(), os.O_RDONLY, 0777)
 	if err != nil {
 		return nil, err
 	}
+
 	total := int64(0)
+	readers := make([]io.Reader, 0, len(m.Positions))
 	for _, bp := range m.Positions {
 		// fmt.Println("read", bp)
 		total += bp.Size()
@@ -188,11 +208,12 @@ func (p *Package) Write(key string, value io.Reader) error {
 							return
 						}
 					}
-					E = p.compactHoles(tx)
+					if rand.Intn(4) == 0 {
+						E = p.compactHoles(tx)
+					}
 				}
 			}()
-			// Write data to new blocks, then recycle old blocks
-			// in the above defer-call
+			// Write data to new blocks, then recycle old blocks in the above defer-call
 		}
 
 		buf, clean := bigBuffer()
@@ -205,7 +226,7 @@ func (p *Package) Write(key string, value io.Reader) error {
 				if err != nil {
 					return err
 				}
-				m.Positions = append(m.Positions, bp)
+				m.Positions = append(m.Positions, bp...)
 			}
 			if n == 0 || err == io.EOF {
 				break
@@ -248,9 +269,19 @@ func (p *Package) Delete(key string) error {
 }
 
 func (p *Package) Compact() error {
-	return p.db.Update(func(tx *bbolt.Tx) error {
-		return p.compactHoles(tx)
+	eof := int64(0)
+	err := p.db.Update(func(tx *bbolt.Tx) error {
+		err := p.compactHoles(tx)
+		if err != nil {
+			return err
+		}
+		eof, err = p.calcTruncate(tx)
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	return p.data.Truncate(eof)
 }
 
 func (p *Package) compactHoles(tx *bbolt.Tx) error {
@@ -261,11 +292,11 @@ func (p *Package) compactHoles(tx *bbolt.Tx) error {
 			holes = append(holes, unmarshalBlockPos(k))
 		}
 		if len(holes) < 2 {
-			return nil
+			continue
 		}
 		for i := 0; i < len(holes)-1; {
 			a, b := holes[i], holes[i+1]
-			if a.Size() == b.Size() && a.End() == b.Offset() {
+			if a.Size() == b.Size() && a.End() == b.Start() {
 				c := NewBlockPos(a.Offset(), a.Size()*2)
 				if err := c.putIntoHole(tx); err != nil {
 					return err
@@ -283,6 +314,31 @@ func (p *Package) compactHoles(tx *bbolt.Tx) error {
 		}
 	}
 	return nil
+}
+
+func (p *Package) calcTruncate(tx *bbolt.Tx) (int64, error) {
+	eof, err := p.data.Seek(0, 2)
+	if err != nil {
+		return 0, err
+	}
+	for cont := true; cont; {
+		cont = false
+		for s := BlockSize_1K; s < BlockSize_16M; s *= 2 {
+			c := tx.Bucket([]byte("holes_" + strconv.Itoa(s))).Cursor()
+			for k, _ := c.Last(); len(k) == 8; k, _ = c.Prev() {
+				if h := unmarshalBlockPos(k); h.End() == eof {
+					eof -= h.Size()
+					if err := h.deleteFromHole(tx); err != nil {
+						return 0, err
+					}
+					cont = true
+					continue
+				}
+				break
+			}
+		}
+	}
+	return eof, nil
 }
 
 func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
