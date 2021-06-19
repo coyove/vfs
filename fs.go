@@ -3,6 +3,7 @@ package vfs
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	bbolt "go.etcd.io/bbolt"
 )
+
+var testFlagSimulateDataWriteError = 0
 
 type Package struct {
 	db   *bbolt.DB
@@ -57,6 +60,12 @@ func (p *Package) writeData(buf []byte, bp BlockPos, padSize bool) error {
 	_, err := p.data.Seek(bp.Offset(), 0)
 	if err != nil {
 		return err
+	}
+	if testFlagSimulateDataWriteError > 0 && rand.Intn(testFlagSimulateDataWriteError) == 0 {
+		x := buf[:rand.Intn(len(buf))]
+		fmt.Println("test flag: simulate data write error", bp, "size=", len(buf), "write=", len(x))
+		p.data.Write(x)
+		return fmt.Errorf("testable")
 	}
 	n, err := p.data.Write(buf)
 	if err != nil {
@@ -155,7 +164,7 @@ func (p *Package) Read(key string) (*ReadCloser, error) {
 
 func (p *Package) Write(key string, value io.Reader) error {
 	keybuf := []byte(key)
-	return p.db.Update(func(tx *bbolt.Tx) error {
+	return p.db.Update(func(tx *bbolt.Tx) (E error) {
 		bk := tx.Bucket(trunkBucket)
 		metabuf := bk.Get(keybuf)
 		m := Meta{
@@ -165,17 +174,25 @@ func (p *Package) Write(key string, value io.Reader) error {
 		}
 
 		if len(metabuf) > 0 {
+			// Overwrite existing data
 			mm := unmarshalMeta(metabuf)
 			m.CreateTime = mm.CreateTime
-			for _, bp := range mm.Positions {
-				if err := bp.putIntoHole(tx); err != nil {
-					return err
-				}
-			}
 			if err := p.incTotalSize(tx, -mm.Size, -1); err != nil {
 				return err
 			}
-			defer p.compactHoles(tx)
+			defer func() {
+				if E == nil {
+					for _, bp := range mm.Positions {
+						if err := bp.putIntoHole(tx); err != nil {
+							E = err
+							return
+						}
+					}
+					E = p.compactHoles(tx)
+				}
+			}()
+			// Write data to new blocks, then recycle old blocks
+			// in the above defer-call
 		}
 
 		buf, clean := bigBuffer()

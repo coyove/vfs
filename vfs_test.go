@@ -3,6 +3,7 @@ package vfs
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -30,11 +31,17 @@ func read(name string) (buf []byte) {
 
 func TestConst(t *testing.T) {
 	rand.Seed(time.Now().Unix())
-	os.RemoveAll("test")
-	os.MkdirAll("test", 0777)
 
 	// bp := NewBlockPos(10, BlockSize_16M)
 	// t.Log(bp.SplitToSize(BlockSize_1K * 4))
+	run(t, 0)
+	run(t, 5)
+}
+
+func run(t *testing.T, v int) {
+	testFlagSimulateDataWriteError = v
+	os.RemoveAll("test")
+	os.MkdirAll("test", 0777)
 
 	p, _ := Open("test")
 	fmt.Println(p.Stat())
@@ -47,7 +54,7 @@ func TestConst(t *testing.T) {
 
 	m := map[string]int{}
 
-	if false {
+	if true {
 		for _, i := range rand.Perm(20) {
 			var x []byte
 			if rand.Intn(2) == 1 {
@@ -56,13 +63,12 @@ func TestConst(t *testing.T) {
 				x = random(rand.Intn(BlockSize_1K * 1024))
 			}
 			key := "zzz" + strconv.Itoa(i)
-			p.Write(key, bytes.NewReader(x))
-			write(key, x)
-			m[key] = 1
+			if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
+				write(key, x)
+				m[key] = 1
+			}
 		}
-	}
 
-	if false {
 		for k := range m {
 			delete(m, k)
 			p.Delete(k)
@@ -80,9 +86,10 @@ func TestConst(t *testing.T) {
 				x = random(rand.Intn(BlockSize_1K * 1024 * 3))
 			}
 			key := "zzz" + strconv.Itoa(i)
-			p.Write(key, bytes.NewReader(x))
-			write(key, x)
-			m[key] = 1
+			if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
+				write(key, x)
+				m[key] = 1
+			}
 		}
 	}
 
@@ -92,7 +99,15 @@ func TestConst(t *testing.T) {
 		if !bytes.Equal(buf1, buf2) {
 			write("a", buf1)
 			write("b", buf2)
-			t.Fatal(len(buf1), len(buf2))
+			p.ForEach(func(m Meta, r io.Reader) error {
+				if m.Name == k {
+					fmt.Println(m.Positions)
+				}
+				return nil
+			})
+			t.Fatal(k, len(buf1), len(buf2))
 		}
 	}
+
+	p.Close()
 }
