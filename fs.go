@@ -306,3 +306,25 @@ func (p *Package) Stat() (totalSize int64, totalCount int64, holes map[string]in
 	})
 	return
 }
+
+func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
+	return p.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket(trunkBucket).Cursor()
+		for k, v := c.First(); len(k) > 0; k, v = c.Next() {
+			sk := string(k)
+			if strings.HasPrefix(sk, "*:") {
+				continue
+			}
+			r, err := p.Read(sk)
+			if err != nil {
+				return err
+			}
+			if err := f(unmarshalMeta(v), r); err != nil {
+				r.Close()
+				return err
+			}
+			r.Close()
+		}
+		return nil
+	})
+}

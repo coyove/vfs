@@ -33,27 +33,36 @@ func TestConst(t *testing.T) {
 	os.RemoveAll("test")
 	os.MkdirAll("test", 0777)
 
-	bp := NewBlockPos(10, BlockSize_16M)
+	// bp := NewBlockPos(10, BlockSize_16M)
 	// t.Log(bp.SplitToSize(BlockSize_1K * 4))
 
 	p, _ := Open("test")
 	fmt.Println(p.Stat())
+	// p.ForEach(func(k Meta, r io.Reader) error {
+	// 	buf, _ := ioutil.ReadAll(r)
+	// 	fmt.Println(k.Name, k.Positions, len(buf))
+	// 	return nil
+	// })
+	// return
 
 	m := map[string]int{}
-	for _, i := range rand.Perm(20) {
-		var x []byte
-		if rand.Intn(2) == 1 {
-			x = random(rand.Intn(BlockSize_16M * 3))
-		} else {
-			x = random(rand.Intn(BlockSize_1K * 1024))
+
+	if false {
+		for _, i := range rand.Perm(20) {
+			var x []byte
+			if rand.Intn(2) == 1 {
+				x = random(rand.Intn(BlockSize_16M * 3))
+			} else {
+				x = random(rand.Intn(BlockSize_1K * 1024))
+			}
+			key := "zzz" + strconv.Itoa(i)
+			p.Write(key, bytes.NewReader(x))
+			write(key, x)
+			m[key] = 1
 		}
-		key := "zzz" + strconv.Itoa(i)
-		p.Write(key, bytes.NewReader(x))
-		write(key, x)
-		m[key] = 1
 	}
 
-	if true {
+	if false {
 		for k := range m {
 			delete(m, k)
 			p.Delete(k)
@@ -66,7 +75,7 @@ func TestConst(t *testing.T) {
 			i += 10
 			var x []byte
 			if rand.Intn(2) == 1 {
-				x = random(rand.Intn(BlockSize_16M))
+				x = random(rand.Intn(BlockSize_16M * 2))
 			} else {
 				x = random(rand.Intn(BlockSize_1K * 1024 * 3))
 			}

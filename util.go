@@ -60,7 +60,7 @@ func newReader(f *os.File, pos BlockPos, sz int) *Reader {
 }
 
 func (r *Reader) Read(p []byte) (int, error) {
-	if r.off > 0 {
+	if r.off >= 0 {
 		_, err := r.f.Seek(r.off, 0)
 		if err != nil {
 			return 0, err
