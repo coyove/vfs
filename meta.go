@@ -10,6 +10,19 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+func bytesToInt64(p []byte) int64 {
+	if len(p) == 0 {
+		return 0
+	}
+	return int64(binary.BigEndian.Uint64(p))
+}
+
+func int64ToBytes(v int64) []byte {
+	b := [8]byte{}
+	binary.BigEndian.PutUint64(b[:], uint64(v))
+	return b[:]
+}
+
 type Meta struct {
 	Name       string     `json:"n"`
 	Size       int64      `json:"sz"`
@@ -79,6 +92,10 @@ func (bp BlockPos) putIntoHole(tx *bbolt.Tx) error {
 	return tx.Bucket([]byte("holes_"+strconv.FormatInt(bp.Size(), 10))).Put(bp.marshal(), []byte("1"))
 }
 
+func (bp BlockPos) deleteFromHole(tx *bbolt.Tx) error {
+	return tx.Bucket([]byte("holes_" + strconv.FormatInt(bp.Size(), 10))).Delete(bp.marshal())
+}
+
 func (bp BlockPos) marshal() []byte {
 	b := [8]byte{}
 	binary.BigEndian.PutUint64(b[:], uint64(bp))
@@ -88,18 +105,4 @@ func (bp BlockPos) marshal() []byte {
 func (bp BlockPos) String() string {
 	sz := [...]string{"1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M"}[int64(math.Log2(float64(bp.Size()/BlockSize_1K)))]
 	return fmt.Sprintf("%d-%d(%s)", bp.Offset(), bp.End(), sz)
-}
-
-func roundSizeToBlock(size int64) int64 {
-	assert(size <= BlockSize_16M)
-	if size <= BlockSize_1K {
-		return size
-	}
-	return BlockSize_1K * int64(math.Pow(2, math.Ceil(math.Log2(float64(size)/float64(BlockSize_1K)))))
-}
-
-func assert(v bool) {
-	if !v {
-		panic("assert")
-	}
 }

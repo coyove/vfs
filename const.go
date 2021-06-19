@@ -5,4 +5,8 @@ const (
 	BlockSize_16M = 16 * 1024 * 1024
 )
 
-var trunkBucket = []byte("trunk")
+var (
+	trunkBucket   = []byte("trunk")
+	totalSizeKey  = []byte("*:size")
+	totalCountKey = []byte("*:count")
+)
