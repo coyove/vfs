@@ -35,7 +35,7 @@ func TestConst(t *testing.T) {
 	// bp := NewBlockPos(10, BlockSize_16M)
 	// t.Log(bp.SplitToSize(BlockSize_1K * 4))
 	run(t, 0)
-	// run(t, 5)
+	run(t, 5)
 }
 
 func run(t *testing.T, v int) {
@@ -46,7 +46,6 @@ func run(t *testing.T, v int) {
 	p, _ := Open("test")
 	defer p.Close()
 	fmt.Println(p.Stat())
-	// return
 	// p.ForEach(func(k Meta, r io.Reader) error {
 	// 	buf, _ := ioutil.ReadAll(r)
 	// 	fmt.Println(k.Name, k.Positions, len(buf))
@@ -72,8 +71,16 @@ func run(t *testing.T, v int) {
 		}
 
 		for k := range m {
-			delete(m, k)
-			p.Delete(k)
+			if rand.Intn(2) == 0 {
+				delete(m, k)
+				p.Delete(k)
+			} else {
+				fmt.Println("copy", k)
+				if fmt.Sprint(p.Copy(k, k+"copy")) != "testable" {
+					m[k+"copy"] = 1
+					write(k+"copy", read(k))
+				}
+			}
 			if rand.Intn(len(m)/4+1) == 0 {
 				break
 			}
