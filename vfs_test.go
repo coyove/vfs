@@ -48,15 +48,22 @@ func run(t *testing.T, v int) {
 
 	defer p.Close()
 	fmt.Println(p.Stat())
-	fmt.Println(p.ListAll())
-	// p.ForEach(func(k Meta, r io.Reader) error {
-	// 	buf, _ := ioutil.ReadAll(r)
-	// 	fmt.Println(k.Name, k.Positions, len(buf))
-	// 	return nil
-	// })
+	fmt.Println(p.ListAll(""))
+
+	// p.WriteAll("/", nil)
+	// p.WriteAll("/tmp/a.txt", nil)
+	// p.WriteAll("/tmp/b.txt", nil)
+	// p.WriteAll("/tmp/log/1.log", nil)
+	// p.WriteAll("/2.log", nil)
+	// fmt.Println(p.ListDir("/"))
+	// fmt.Println(p.ListDir("/tmp"))
 	// return
 
 	m := map[string]int{}
+	if key := "zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
+		write(key, nil)
+		m[key] = 1
+	}
 
 	for _, i := range rand.Perm(20) {
 		var x []byte
@@ -73,12 +80,17 @@ func run(t *testing.T, v int) {
 	}
 
 	if true {
+		trashed := []string{}
 		for k := range m {
 			if rand.Intn(2) == 0 {
-				delete(m, k)
-				p.Delete(k)
+				if rand.Intn(2) == 0 {
+					p.Delete(k, true)
+					trashed = append(trashed, k)
+				} else {
+					delete(m, k)
+					p.Delete(k, false)
+				}
 			} else {
-				fmt.Println("copy", k)
 				if fmt.Sprint(p.Copy(k, k+"copy")) != "testable" {
 					m[k+"copy"] = 1
 					write(k+"copy", read(k))
@@ -87,6 +99,10 @@ func run(t *testing.T, v int) {
 			if rand.Intn(len(m)/4+1) == 0 {
 				break
 			}
+		}
+
+		for _, k := range trashed {
+			p.Restore(k)
 		}
 
 		for _, i := range rand.Perm(15) {
@@ -129,6 +145,10 @@ func run(t *testing.T, v int) {
 			defer f2.Close()
 
 			sz := f1.size
+			if sz == 0 {
+				return
+			}
+
 			for i := 0; i < 10; i++ {
 				off := int64(rand.Intn(int(sz)))
 				f1.Seek(off, 0)

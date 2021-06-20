@@ -32,6 +32,10 @@ func Open(path string) (*Package, error) {
 	dataFileHash := ""
 	dataFileMinSize := int64(0)
 	if err := db.Update(func(tx *bbolt.Tx) error {
+		if _, err := tx.CreateBucketIfNotExists(trashBucket); err != nil {
+			return err
+		}
+
 		trunk, err := tx.CreateBucketIfNotExists(trunkBucket)
 		if err != nil {
 			return err
@@ -58,8 +62,9 @@ func Open(path string) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	if eof, _ := f.Seek(0, 2); eof < dataFileMinSize {
+	if eof, err := f.Seek(0, 2); err != nil {
+		return nil, err
+	} else if eof < dataFileMinSize {
 		return nil, fmt.Errorf("corrupted data file size: %v, require at least %v", eof, dataFileMinSize)
 	}
 
@@ -134,14 +139,13 @@ func (p *Package) ReadAll(key string) ([]byte, error) {
 	return ioutil.ReadAll(r)
 }
 
-func (p *Package) Meta(key string) (Meta, error) {
-	var m Meta
+func (p *Package) Meta(key string) (m Meta, err error) {
 	keybuf := []byte(key)
-	err := p.db.View(func(tx *bbolt.Tx) error {
+	err = p.db.View(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
 		metabuf := bk.Get(keybuf)
 		if len(metabuf) == 0 {
-			return fmt.Errorf("not found")
+			return ErrNotFound
 		}
 		m = unmarshalMeta(metabuf)
 		return nil
@@ -172,7 +176,33 @@ func (p *Package) Open(key string) (*File, error) {
 	return r, nil
 }
 
-func (p *Package) Write(key string, value io.Reader) error {
+func (p *Package) UpdateTags(key string, f func(map[string]string) error) error {
+	return p.db.Update(func(tx *bbolt.Tx) error {
+		m, err := p.Meta(key)
+		if err != nil {
+			return err
+		}
+		if m.Tags == nil {
+			m.Tags = map[string]string{}
+		}
+		if err := f(m.Tags); err != nil {
+			return err
+		}
+		return tx.Bucket(trunkBucket).Put([]byte(key), m.marshal())
+	})
+}
+
+func (p *Package) WriteAll(key string, value []byte, kvs ...string) error {
+	return p.Write(key, bytes.NewReader(value), kvs...)
+}
+
+func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
+	if !checkName(key) {
+		return ErrInvalidName
+	}
+	if len(kvs)%2 == 1 {
+		return fmt.Errorf("invalid key value pairs")
+	}
 	keybuf := []byte(key)
 	return p.db.Update(func(tx *bbolt.Tx) (E error) {
 		bk := tx.Bucket(trunkBucket)
@@ -181,18 +211,19 @@ func (p *Package) Write(key string, value io.Reader) error {
 			Name:       key,
 			CreateTime: time.Now().Unix(),
 			ModTime:    time.Now().Unix(),
+			Tags:       kvsToMap(kvs...),
 		}
 
 		if len(metabuf) > 0 {
 			// Overwrite existing data
-			mm := unmarshalMeta(metabuf)
-			m.CreateTime = mm.CreateTime
-			if err := p.incTotalSize(tx, -mm.Size, -1); err != nil {
+			old := unmarshalMeta(metabuf)
+			m.CreateTime = old.CreateTime
+			if err := p.incTotalSize(tx, trunkBucket, -old.Size, -1); err != nil {
 				return err
 			}
 			defer func() {
 				if E == nil {
-					E = mm.Positions.Free(tx)
+					E = old.Positions.Free(tx)
 				}
 			}()
 			// Write data to new blocks, then recycle old blocks in the above defer-call
@@ -239,7 +270,7 @@ func (p *Package) Write(key string, value io.Reader) error {
 			m.Positions = nil
 		}
 
-		if err := p.incTotalSize(tx, m.Size, 1); err != nil {
+		if err := p.incTotalSize(tx, trunkBucket, m.Size, 1); err != nil {
 			return err
 		}
 		// fmt.Println(m.Positions)
@@ -248,19 +279,50 @@ func (p *Package) Write(key string, value io.Reader) error {
 	})
 }
 
-func (p *Package) Delete(key string) error {
+func (p *Package) Restore(key string) error {
+	keybuf := []byte(key)
+	return p.db.Update(func(tx *bbolt.Tx) error {
+		bk := tx.Bucket(trashBucket)
+		metabuf := bk.Get(keybuf)
+		if len(metabuf) == 0 {
+			return ErrNotFound
+		}
+		m := unmarshalMeta(metabuf)
+		if err := p.incTotalSize(tx, trunkBucket, m.Size, 1); err != nil {
+			return err
+		}
+		if err := p.incTotalSize(tx, trashBucket, -m.Size, -1); err != nil {
+			return err
+		}
+		if err := bk.Delete(keybuf); err != nil {
+			return err
+		}
+		return tx.Bucket(trunkBucket).Put(keybuf, metabuf)
+	})
+}
+
+func (p *Package) Delete(key string, trash bool) error {
 	keybuf := []byte(key)
 	return p.db.Update(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
 		metabuf := bk.Get(keybuf)
 		if len(metabuf) == 0 {
-			return nil
+			return ErrNotFound
 		}
 		m := unmarshalMeta(metabuf)
-		if err := m.Positions.Free(tx); err != nil {
-			return err
+		if trash {
+			if err := tx.Bucket(trashBucket).Put(keybuf, metabuf); err != nil {
+				return err
+			}
+			if err := p.incTotalSize(tx, trashBucket, m.Size, 1); err != nil {
+				return err
+			}
+		} else {
+			if err := m.Positions.Free(tx); err != nil {
+				return err
+			}
 		}
-		if err := p.incTotalSize(tx, -m.Size, -1); err != nil {
+		if err := p.incTotalSize(tx, trunkBucket, -m.Size, -1); err != nil {
 			return err
 		}
 		return bk.Delete(keybuf)
@@ -268,19 +330,20 @@ func (p *Package) Delete(key string) error {
 }
 
 func (p *Package) Rename(oldname, newname string) error {
+	if !checkName(newname) {
+		return ErrInvalidName
+	}
 	return p.db.Update(func(tx *bbolt.Tx) error {
-		m, _ := p.Meta(newname)
+		m, err := p.Meta(oldname)
+		if err != nil {
+			return err
+		}
 		if m.Name == newname {
 			return fmt.Errorf("rename: new name already occupied")
 		}
 
-		bk := tx.Bucket(trunkBucket)
-		metabuf := bk.Get([]byte(oldname))
-		if len(metabuf) == 0 {
-			return nil
-		}
-		m = unmarshalMeta(metabuf)
 		m.Name = newname
+		bk := tx.Bucket(trunkBucket)
 		if err := bk.Delete([]byte(oldname)); err != nil {
 			return err
 		}
@@ -297,8 +360,8 @@ func (p *Package) Copy(from, to string) error {
 	return p.Write(to, f)
 }
 
-func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
-	bk := tx.Bucket(trunkBucket)
+func (p *Package) incTotalSize(tx *bbolt.Tx, bkName []byte, sz, cnt int64) error {
+	bk := tx.Bucket(bkName)
 	if sz != 0 {
 		if err := bk.Put(totalSizeKey, int64ToBytes(bytesToInt64(bk.Get(totalSizeKey))+sz)); err != nil {
 			return err
@@ -351,15 +414,22 @@ func (p *Package) SetMaxSize(v int64) error {
 	})
 }
 
-func (p *Package) ListAll() (names []string, err error) {
+func (p *Package) ListAll(prefix string) (names []Meta, err error) {
+	return p.listAll(prefix, trunkBucket)
+}
+
+func (p *Package) ListAllTrash(prefix string) (names []Meta, err error) {
+	return p.listAll(prefix, trashBucket)
+}
+
+func (p *Package) listAll(prefix string, bkName []byte) (names []Meta, err error) {
 	err = p.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(trunkBucket).Cursor()
-		for k, _ := c.First(); len(k) > 0; k, _ = c.Next() {
+		c := tx.Bucket(bkName).Cursor()
+		for k, v := c.First(); len(k) > 0; k, v = c.Next() {
 			sk := string(k)
-			if strings.HasPrefix(sk, "*:") {
-				continue
+			if !strings.HasPrefix(sk, "*:") && strings.HasPrefix(sk, prefix) {
+				names = append(names, unmarshalMeta(v))
 			}
-			names = append(names, sk)
 		}
 		return nil
 	})

@@ -37,13 +37,14 @@ func uint32ToBytes(v uint32) []byte {
 }
 
 type Meta struct {
-	Name       string          `json:"n"`
-	Size       int64           `json:"sz"`
-	Positions  Blocks          `json:"pos"`
-	CreateTime int64           `json:"ct"`
-	ModTime    int64           `json:"mt"`
-	SmallData  []byte          `json:"R"`
-	Sha1       [sha1.Size]byte `json:"S"`
+	Name       string            `json:"n"`
+	Size       int64             `json:"sz"`
+	Positions  Blocks            `json:"pos"`
+	CreateTime int64             `json:"ct"`
+	ModTime    int64             `json:"mt"`
+	SmallData  []byte            `json:"R"`
+	Sha1       [sha1.Size]byte   `json:"S"`
+	Tags       map[string]string `json:"T"`
 }
 
 func unmarshalMeta(p []byte) Meta {

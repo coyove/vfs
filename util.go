@@ -5,6 +5,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -40,6 +41,10 @@ type File struct {
 	offsets []int64
 	cursor  int64
 	small   []byte
+}
+
+func (f *File) Size() int64 {
+	return f.size
 }
 
 func (r *File) Seek(offset int64, whence int) (int64, error) {
@@ -103,4 +108,44 @@ func (r *File) Read(p []byte) (int, error) {
 	n, err := r.f.Read(p)
 	r.cursor += int64(n)
 	return n, err
+}
+
+func checkName(s string) bool {
+	valid := func(s string) bool {
+		if s == "" || s == "/" {
+			return false
+		}
+		dots, size := 0, 0
+		for _, r := range s {
+			size++
+			switch r {
+			case '/', '*', '?', '\\', ':', '"', '<', '>', '|':
+				return false
+			case '.':
+				dots++
+			}
+		}
+		if dots == size {
+			return false
+		}
+		return true
+	}
+	s = strings.TrimPrefix(s, "/")
+	for _, p := range strings.Split(s, "/") {
+		if !valid(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func kvsToMap(kvs ...string) map[string]string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	m := map[string]string{}
+	for i := 0; i < len(kvs); i += 2 {
+		m[kvs[i]] = kvs[i+1]
+	}
+	return m
 }
