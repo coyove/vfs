@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -122,5 +123,31 @@ func run(t *testing.T, v int) {
 			t.Fatal(k, m.Sha1, h)
 		}
 
+	}
+
+	for k := range m {
+		func() {
+			f1, _ := p.Open(k)
+			defer f1.Close()
+			f2, _ := os.Open("test/" + k)
+			defer f2.Close()
+
+			sz := f1.size
+			for i := 0; i < 10; i++ {
+				off := int64(rand.Intn(int(sz)))
+				f1.Seek(off, 0)
+				f2.Seek(off, 0)
+				sz := int64(rand.Intn(int(f1.size - off)))
+				x1, x2 := make([]byte, sz), make([]byte, sz)
+				n1, _ := io.ReadFull(f1, x1)
+				n2, _ := io.ReadFull(f2, x2)
+				x1 = x1[:n1]
+				x2 = x2[:n2]
+
+				if !bytes.Equal(x1, x2) {
+					t.Fatal(k, len(x1), len(x2))
+				}
+			}
+		}()
 	}
 }

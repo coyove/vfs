@@ -128,14 +128,14 @@ func (p *Package) Meta(key string) (Meta, error) {
 	return m, err
 }
 
-func (p *Package) Open(key string) (io.ReadCloser, error) {
+func (p *Package) Open(key string) (*File, error) {
 	m, err := p.Meta(key)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(m.SmallData) == int(m.Size) {
-		return ioutil.NopCloser(bytes.NewReader(m.SmallData)), nil
+		return &File{size: int64(len(m.SmallData)), small: m.SmallData}, nil
 	}
 
 	f, err := os.OpenFile(p.data.Name(), os.O_RDONLY, 0777)
@@ -143,19 +143,12 @@ func (p *Package) Open(key string) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	total := int64(0)
-	readers := make([]io.Reader, 0, len(m.Positions)/2)
+	r := &File{f: f, size: m.Size, offsets: make([]int64, 0, len(m.Positions)/2)}
 	m.Positions.ForEach(func(v uint32) error {
-		off := int64(v) * BlockSize
-		total += BlockSize
-		if total > m.Size {
-			readers = append(readers, newReader(f, off, int(m.Size-(total-BlockSize))))
-		} else {
-			readers = append(readers, newReader(f, off, BlockSize))
-		}
+		r.offsets = append(r.offsets, int64(v)*BlockSize)
 		return nil
 	})
-	return &ReadCloser{io.MultiReader(readers...), m.Size, readers, f}, nil
+	return r, nil
 }
 
 func (p *Package) Write(key string, value io.Reader) error {

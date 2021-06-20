@@ -25,53 +25,73 @@ func assert(v bool) {
 	}
 }
 
-type Reader struct {
-	sz   int
-	f    *os.File
-	read int
-	off  int64
+type File struct {
+	f       *os.File
+	size    int64
+	offsets []int64
+	cursor  int64
+	small   []byte
 }
 
-type ReadCloser struct {
-	io.Reader
-	sz  int64
-	rds []io.Reader
-	f   *os.File
-}
-
-func (r *ReadCloser) Seek(offset int64, whence int) (int64, error) {
+func (r *File) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
 	case 0:
+		r.cursor = offset
 	case 1:
+		r.cursor += offset
 	case 2:
+		r.cursor = r.size + offset
+	default:
+		return 0, fmt.Errorf("invalid whence")
 	}
-	return 0, fmt.Errorf("invalid whence")
+	if r.cursor < 0 || r.cursor >= r.size {
+		return 0, fmt.Errorf("invalid cursor: %v", r.cursor)
+	}
+	return r.cursor, nil
 }
 
-func (r *ReadCloser) Close() error {
+func (r *File) Close() error {
+	if r.f == nil {
+		return nil
+	}
 	return r.f.Close()
 }
 
-func newReader(f *os.File, off int64, sz int) *Reader {
-	r := &Reader{f: f, sz: sz, off: off}
-	return r
-}
-
-func (r *Reader) Read(p []byte) (int, error) {
-	if r.off >= 0 {
-		_, err := r.f.Seek(r.off, 0)
-		if err != nil {
-			return 0, err
-		}
-		r.off = -1
-	}
-	if r.read >= r.sz {
+func (r *File) Read(p []byte) (int, error) {
+	if r.cursor >= r.size {
 		return 0, io.EOF
 	}
-	n, err := r.f.Read(p)
-	r.read += n
-	if r.read > r.sz {
-		n -= r.read - r.sz
+
+	if r.f == nil { // use r.small
+		n := copy(p, r.small[r.cursor:])
+		r.cursor += int64(n)
+		return n, nil
 	}
+
+	idx := r.cursor / BlockSize
+	assert(int(idx) < len(r.offsets))
+
+	_, err := r.f.Seek(r.offsets[idx]+r.cursor-idx*BlockSize, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	cursorInBlock := r.cursor - r.cursor/BlockSize*BlockSize
+	var left int64
+	if int(idx) == len(r.offsets)-1 {
+		lastBlockSize := r.size % BlockSize
+		if lastBlockSize == 0 {
+			lastBlockSize = BlockSize
+		}
+		left = lastBlockSize - cursorInBlock
+	} else {
+		left = BlockSize - cursorInBlock
+	}
+
+	if len(p) > int(left) {
+		p = p[:left]
+	}
+	n, err := r.f.Read(p)
+	r.cursor += int64(n)
 	return n, err
 }
