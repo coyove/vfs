@@ -3,6 +3,7 @@ package vfs
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -23,25 +24,45 @@ type Package struct {
 
 func Open(path string) (*Package, error) {
 	path = strings.TrimSuffix(path, ".index")
-	path = strings.TrimSuffix(path, ".data")
 	db, err := bbolt.Open(path+".index", 0777, nil)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path+".data", os.O_CREATE|os.O_RDWR, 0777)
-	if err != nil {
-		return nil, err
-	}
+
+	dataFileHash := ""
+	dataFileMinSize := int64(0)
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(freeBucket)
+		trunk, err := tx.CreateBucketIfNotExists(trunkBucket)
 		if err != nil {
 			return err
 		}
-		_, err = tx.CreateBucketIfNotExists(trunkBucket)
+
+		dataFileMinSize = bytesToInt64(trunk.Get(dataSizeKey))
+
+		h := trunk.Get(dataFileKey)
+		if len(h) != 8 {
+			h = random(8)
+		}
+		dataFileHash = hex.EncodeToString(h)
+		if err := trunk.Put(dataFileKey, h); err != nil {
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists(freeBucket)
 		return err
 	}); err != nil {
 		return nil, err
 	}
+
+	f, err := os.OpenFile(path+"."+dataFileHash+".data", os.O_CREATE|os.O_RDWR, 0777)
+	if err != nil {
+		return nil, err
+	}
+
+	if eof, _ := f.Seek(0, 2); eof < dataFileMinSize {
+		return nil, fmt.Errorf("corrupted data file size: %v, require at least %v", eof, dataFileMinSize)
+	}
+
 	p := &Package{
 		db:   db,
 		data: f,

@@ -3,6 +3,7 @@ package vfs
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"sync"
 )
@@ -18,6 +19,14 @@ var bigBuffer = func() func() ([]byte, func()) {
 		return buf, func() { pool.Put(buf) }
 	}
 }()
+
+func random(n int) []byte {
+	buf := make([]byte, n)
+	for i := range buf {
+		buf[i] = byte(rand.Int())
+	}
+	return buf
+}
 
 func assert(v bool) {
 	if !v {

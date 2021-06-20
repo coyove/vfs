@@ -13,14 +13,6 @@ import (
 	"time"
 )
 
-func random(n int) []byte {
-	buf := make([]byte, n)
-	for i := range buf {
-		buf[i] = byte(rand.Int())
-	}
-	return buf
-}
-
 func write(name string, buf []byte) {
 	ioutil.WriteFile("test/"+name, buf, 0777)
 }
@@ -49,7 +41,11 @@ func run(t *testing.T, v int) {
 	os.RemoveAll("test")
 	os.MkdirAll("test", 0777)
 
-	p, _ := Open("test")
+	p, err := Open("test")
+	if err != nil {
+		panic(err)
+	}
+
 	defer p.Close()
 	fmt.Println(p.Stat())
 	fmt.Println(p.ListAll())
