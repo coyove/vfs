@@ -1,11 +1,11 @@
 package vfs
 
 import (
+	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
-	"math"
 	"strconv"
+	"strings"
 
 	"go.etcd.io/bbolt"
 )
@@ -23,12 +23,27 @@ func int64ToBytes(v int64) []byte {
 	return b[:]
 }
 
+func bytesToUint32(p []byte) uint32 {
+	if len(p) == 0 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(p)
+}
+
+func uint32ToBytes(v uint32) []byte {
+	b := [4]byte{}
+	binary.BigEndian.PutUint32(b[:], v)
+	return b[:]
+}
+
 type Meta struct {
-	Name       string     `json:"n"`
-	Size       int64      `json:"sz"`
-	Positions  []BlockPos `json:"pos"`
-	CreateTime int64      `json:"ct"`
-	ModTime    int64      `json:"mt"`
+	Name       string          `json:"n"`
+	Size       int64           `json:"sz"`
+	Positions  Blocks          `json:"pos"`
+	CreateTime int64           `json:"ct"`
+	ModTime    int64           `json:"mt"`
+	SmallData  []byte          `json:"R"`
+	Sha1       [sha1.Size]byte `json:"S"`
 }
 
 func unmarshalMeta(p []byte) Meta {
@@ -42,71 +57,46 @@ func (m Meta) marshal() []byte {
 	return buf
 }
 
-type BlockPos uint64
+type Blocks []byte
 
-func NewBlockPos(offset int64, size int64) BlockPos {
-	x := int64(math.Log2(float64(size / BlockSize_1K)))
-	return BlockPos(offset)<<8 | BlockPos(x)
+func (b *Blocks) Append(v uint32) {
+	*b = append(*b, 0, 0, 0, 0, 0)
+	n := binary.PutUvarint((*b)[len(*b)-5:], uint64(v))
+	*b = (*b)[:len(*b)-5+n]
 }
 
-func unmarshalBlockPos(b []byte) BlockPos {
-	return BlockPos(binary.BigEndian.Uint64(b))
-}
-
-func (bp BlockPos) Offset() (offset int64) {
-	return int64(bp) >> 8
-}
-
-func (bp BlockPos) Start() (offset int64) {
-	return int64(bp) >> 8
-}
-
-func (bp BlockPos) Size() (size int64) {
-	return BlockSize_1K * int64(math.Pow(2, float64(byte(bp))))
-}
-
-func (bp BlockPos) End() (size int64) {
-	return bp.Offset() + bp.Size()
-}
-
-func (bp BlockPos) Split() (BlockPos, BlockPos) {
-	assert(bp.Size() > BlockSize_1K)
-	sz := bp.Size() / 2
-	return NewBlockPos(bp.Offset(), sz), NewBlockPos(bp.Offset()+sz, sz)
-}
-
-func (bp BlockPos) SplitToSize(size int64) (BlockPos, []BlockPos) {
-	assert(size <= bp.Size())
-	if size == bp.Size() {
-		return bp, nil
-	}
-	bps := []BlockPos{}
-	for {
-		bp1, bp2 := bp.Split()
-		bps = append(bps, bp2)
-		bp = bp1
-		if bp.Size() == size {
+func (b Blocks) ForEach(f func(v uint32) error) error {
+	for x := b; len(x) > 0; {
+		v, n := binary.Uvarint(x)
+		if n == 0 {
 			break
 		}
+		assert(n > 0)
+		if err := f(uint32(v)); err != nil {
+			return err
+		}
+		x = x[n:]
 	}
-	return bp, bps
+	return nil
 }
 
-func (bp BlockPos) putIntoHole(tx *bbolt.Tx) error {
-	return tx.Bucket([]byte("holes_"+strconv.FormatInt(bp.Size(), 10))).Put(bp.marshal(), []byte("1"))
+func (b Blocks) String() string {
+	buf := make([]string, 0, len(b)/2)
+	b.ForEach(func(v uint32) error {
+		buf = append(buf, "0x"+strconv.FormatInt(int64(v)*BlockSize, 16))
+		return nil
+	})
+	return "[" + strings.Join(buf, ",") + "]"
 }
 
-func (bp BlockPos) deleteFromHole(tx *bbolt.Tx) error {
-	return tx.Bucket([]byte("holes_" + strconv.FormatInt(bp.Size(), 10))).Delete(bp.marshal())
+func (b Blocks) Free(tx *bbolt.Tx) error {
+	return b.ForEach(func(v uint32) error { return putIntoHole(tx, v) })
 }
 
-func (bp BlockPos) marshal() []byte {
-	b := [8]byte{}
-	binary.BigEndian.PutUint64(b[:], uint64(bp))
-	return b[:]
+func putIntoHole(tx *bbolt.Tx, v uint32) error {
+	return tx.Bucket(freeBucket).Put(uint32ToBytes(v), []byte{})
 }
 
-func (bp BlockPos) String() string {
-	sz := [...]string{"1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M"}[int64(math.Log2(float64(bp.Size()/BlockSize_1K)))]
-	return fmt.Sprintf("%d-%d(%s)", bp.Offset(), bp.End(), sz)
+func deleteFromHole(tx *bbolt.Tx, v uint32) error {
+	return tx.Bucket(freeBucket).Delete(uint32ToBytes(v))
 }

@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -29,6 +30,11 @@ func read(name string) (buf []byte) {
 	return
 }
 
+func hash(name string) [sha1.Size]byte {
+	buf, _ := ioutil.ReadFile("test/" + name)
+	return sha1.Sum(buf)
+}
+
 func TestConst(t *testing.T) {
 	rand.Seed(time.Now().Unix())
 
@@ -51,25 +57,25 @@ func run(t *testing.T, v int) {
 	// 	fmt.Println(k.Name, k.Positions, len(buf))
 	// 	return nil
 	// })
-	// return
+	return
 
 	m := map[string]int{}
 
-	if true {
-		for _, i := range rand.Perm(20) {
-			var x []byte
-			if rand.Intn(2) == 1 {
-				x = random(rand.Intn(BlockSize_16M * 3))
-			} else {
-				x = random(rand.Intn(BlockSize_1K * 1024))
-			}
-			key := "zzz" + strconv.Itoa(i)
-			if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
-				write(key, x)
-				m[key] = 1
-			}
+	for _, i := range rand.Perm(20) {
+		var x []byte
+		if rand.Intn(2) == 1 {
+			x = random(rand.Intn(16 * 1024 * 1024 * 3))
+		} else {
+			x = random(rand.Intn(1024 * 1024))
 		}
+		key := "zzz" + strconv.Itoa(i)
+		if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
+			write(key, x)
+			m[key] = 1
+		}
+	}
 
+	if true {
 		for k := range m {
 			if rand.Intn(2) == 0 {
 				delete(m, k)
@@ -90,9 +96,9 @@ func run(t *testing.T, v int) {
 			i += 10
 			var x []byte
 			if rand.Intn(2) == 1 {
-				x = random(rand.Intn(BlockSize_16M * 2))
+				x = random(rand.Intn(16 * 1024 * 1024))
 			} else {
-				x = random(rand.Intn(BlockSize_1K * 1024 * 3))
+				x = random(rand.Intn(4 * 1024 * 1024))
 			}
 			key := "zzz" + strconv.Itoa(i)
 			if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
@@ -116,5 +122,11 @@ func run(t *testing.T, v int) {
 			})
 			t.Fatal(k, len(buf1), len(buf2))
 		}
+
+		m, _ := p.Meta(k)
+		if h := hash(k); m.Sha1 != h {
+			t.Fatal(k, m.Sha1, h)
+		}
+
 	}
 }

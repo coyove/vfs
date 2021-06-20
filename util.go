@@ -2,8 +2,6 @@ package vfs
 
 import (
 	"io"
-	"io/ioutil"
-	"math"
 	"os"
 	"sync"
 )
@@ -11,7 +9,7 @@ import (
 var bigBuffer = func() func() ([]byte, func()) {
 	pool := sync.Pool{
 		New: func() interface{} {
-			return make([]byte, BlockSize_16M)
+			return make([]byte, BlockSize)
 		},
 	}
 	return func() ([]byte, func()) {
@@ -19,14 +17,6 @@ var bigBuffer = func() func() ([]byte, func()) {
 		return buf, func() { pool.Put(buf) }
 	}
 }()
-
-func roundSizeToBlock(size int64) int64 {
-	assert(size <= BlockSize_16M)
-	if size <= BlockSize_1K {
-		return BlockSize_1K
-	}
-	return BlockSize_1K * int64(math.Pow(2, math.Ceil(math.Log2(float64(size)/float64(BlockSize_1K)))))
-}
 
 func assert(v bool) {
 	if !v {
@@ -50,12 +40,8 @@ func (r *ReadCloser) Close() error {
 	return r.f.Close()
 }
 
-func (r *ReadCloser) ReadAll() ([]byte, error) {
-	return ioutil.ReadAll(r)
-}
-
-func newReader(f *os.File, pos BlockPos, sz int) *Reader {
-	r := &Reader{f: f, sz: sz, off: pos.Offset()}
+func newReader(f *os.File, off int64, sz int) *Reader {
+	r := &Reader{f: f, sz: sz, off: off}
 	return r
 }
 

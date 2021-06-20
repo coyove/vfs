@@ -1,12 +1,13 @@
 package vfs
 
 const (
-	BlockSize_1K  = 1024
-	BlockSize_16M = 16 * 1024 * 1024
+	BlockSize = 1024 * 128
 )
 
 var (
 	trunkBucket   = []byte("trunk")
+	freeBucket    = []byte("free")
+	dataSizeKey   = []byte("*:data")
 	totalSizeKey  = []byte("*:size")
 	totalCountKey = []byte("*:count")
 )

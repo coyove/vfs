@@ -1,11 +1,13 @@
 package vfs
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,13 +33,11 @@ func Open(path string) (*Package, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for s := BlockSize_1K; s <= BlockSize_16M; s *= 2 {
-			_, err := tx.CreateBucketIfNotExists([]byte("holes_" + strconv.Itoa(s)))
-			if err != nil {
-				return err
-			}
+		_, err := tx.CreateBucketIfNotExists(freeBucket)
+		if err != nil {
+			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(trunkBucket)
+		_, err = tx.CreateBucketIfNotExists(trunkBucket)
 		return err
 	}); err != nil {
 		return nil, err
@@ -56,14 +56,14 @@ func (p *Package) Close() error {
 	return p.data.Close()
 }
 
-func (p *Package) writeData(buf []byte, bp BlockPos, padSize bool) error {
-	if _, err := p.data.Seek(bp.Offset(), 0); err != nil {
+func (p *Package) writeData(buf []byte, off int64, padSize bool) error {
+	if _, err := p.data.Seek(off, 0); err != nil {
 		return err
 	}
 
 	if testFlagSimulateDataWriteError > 0 && rand.Intn(testFlagSimulateDataWriteError) == 0 {
 		x := buf[:rand.Intn(len(buf))]
-		fmt.Println("test flag: simulate data write error", bp, "size=", len(buf), "write=", len(x))
+		fmt.Println("test flag: simulate data write error, off=", off, "size=", len(buf), "write=", len(x))
 		p.data.Write(x)
 		return fmt.Errorf("testable")
 	}
@@ -73,8 +73,8 @@ func (p *Package) writeData(buf []byte, bp BlockPos, padSize bool) error {
 		return fmt.Errorf("write data: %v, written: %v", err, n)
 	}
 
-	if padSize && n < int(bp.Size()) {
-		paddings := make([]byte, bp.Size()-int64(n))
+	if padSize && n < BlockSize {
+		paddings := make([]byte, BlockSize-n)
 		n, err = p.data.Write(paddings)
 		if err != nil || n != len(paddings) {
 			return fmt.Errorf("write paddings: %v, written: %v", err, n)
@@ -83,55 +83,25 @@ func (p *Package) writeData(buf []byte, bp BlockPos, padSize bool) error {
 	return nil
 }
 
-func (p *Package) putData(tx *bbolt.Tx, buf []byte) ([]BlockPos, error) {
-	sz := int64(len(buf))
-	downSearched := false
-	assert(sz <= BlockSize_16M)
-	// Search upwards for free blocks
-	for bsz := roundSizeToBlock(sz); bsz <= BlockSize_16M; bsz *= 2 {
-		bk := tx.Bucket([]byte("holes_" + strconv.FormatInt(bsz, 10)))
-		k, _ := bk.Cursor().First()
-		if len(k) == 8 {
-			bp := unmarshalBlockPos(k)
-			if err := bk.Delete(k); err != nil {
-				return nil, err
-			}
-			bp1, bps := bp.SplitToSize(bsz)
-			bp = bp1
-			for _, bp := range bps {
-				if err := bp.putIntoHole(tx); err != nil {
-					return nil, err
-				}
-			}
-			return []BlockPos{bp}, p.writeData(buf, bp, false)
+func (p *Package) putData(tx *bbolt.Tx, buf []byte) (int64, error) {
+	assert(len(buf) <= BlockSize)
+
+	bk := tx.Bucket(freeBucket)
+	if k, _ := bk.Cursor().First(); len(k) == 4 {
+		boff := bytesToUint32(k)
+		off := int64(boff) * BlockSize
+		if err := deleteFromHole(tx, boff); err != nil {
+			return 0, err
 		}
-		// Search downwards if it is a relatively big block (>1M)
-		if !downSearched {
-			if bsz := roundSizeToBlock(sz); bsz > BlockSize_1K*1024 {
-				bsz /= 2
-				bk := tx.Bucket([]byte("holes_" + strconv.FormatInt(bsz, 10)))
-				if bk.Stats().KeyN >= 1 {
-					a, err := p.putData(tx, buf[:bsz])
-					if err != nil {
-						return nil, err
-					}
-					b, err := p.putData(tx, buf[bsz:])
-					if err != nil {
-						return nil, err
-					}
-					return append(a, b...), nil
-				}
-			}
-			downSearched = true
-		}
+		return off, p.writeData(buf, off, false)
 	}
 	// No free blocks, create one at the end of data file
-	fi, err := p.data.Seek(0, 2)
-	if err != nil {
-		return nil, err
+	trunk := tx.Bucket(trunkBucket)
+	eof := bytesToInt64(trunk.Get(dataSizeKey))
+	if err := p.writeData(buf, eof, true); err != nil {
+		return 0, err
 	}
-	bp := NewBlockPos(fi, roundSizeToBlock(sz))
-	return []BlockPos{bp}, p.writeData(buf, bp, true)
+	return eof, trunk.Put(dataSizeKey, int64ToBytes(eof+BlockSize))
 }
 
 func (p *Package) ReadAll(key string) ([]byte, error) {
@@ -139,7 +109,8 @@ func (p *Package) ReadAll(key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.ReadAll()
+	defer r.Close()
+	return ioutil.ReadAll(r)
 }
 
 func (p *Package) Meta(key string) (Meta, error) {
@@ -157,10 +128,14 @@ func (p *Package) Meta(key string) (Meta, error) {
 	return m, err
 }
 
-func (p *Package) Read(key string) (*ReadCloser, error) {
+func (p *Package) Read(key string) (io.ReadCloser, error) {
 	m, err := p.Meta(key)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(m.SmallData) == int(m.Size) {
+		return ioutil.NopCloser(bytes.NewReader(m.SmallData)), nil
 	}
 
 	f, err := os.OpenFile(p.data.Name(), os.O_RDONLY, 0777)
@@ -169,15 +144,17 @@ func (p *Package) Read(key string) (*ReadCloser, error) {
 	}
 
 	total := int64(0)
-	readers := make([]io.Reader, 0, len(m.Positions))
-	for _, bp := range m.Positions {
-		total += bp.Size()
+	readers := make([]io.Reader, 0, len(m.Positions)/2)
+	m.Positions.ForEach(func(v uint32) error {
+		off := int64(v) * BlockSize
+		total += BlockSize
 		if total > m.Size {
-			readers = append(readers, newReader(f, bp, int(m.Size-(total-bp.Size()))))
+			readers = append(readers, newReader(f, off, int(m.Size-(total-BlockSize))))
 		} else {
-			readers = append(readers, newReader(f, bp, int(bp.Size())))
+			readers = append(readers, newReader(f, off, BlockSize))
 		}
-	}
+		return nil
+	})
 	return &ReadCloser{io.MultiReader(readers...), f}, nil
 }
 
@@ -201,42 +178,31 @@ func (p *Package) Write(key string, value io.Reader) error {
 			}
 			defer func() {
 				if E == nil {
-					for _, bp := range mm.Positions {
-						if err := bp.putIntoHole(tx); err != nil {
-							E = err
-							return
-						}
-					}
-					if rand.Intn(4) == 0 {
-						E = p.compactHoles(tx)
-					}
+					E = mm.Positions.Free(tx)
 				}
 			}()
 			// Write data to new blocks, then recycle old blocks in the above defer-call
 		}
 
-		beforeSize, err := p.data.Seek(0, 2)
-		if err != nil {
-			return err
-		}
-
 		buf, clean := bigBuffer()
-		defer func() {
-			clean()
-			if E != nil {
-				p.data.Truncate(beforeSize)
-			}
-		}()
+		small := bytes.Buffer{}
+		h := sha1.New()
+		defer clean()
 
 		for {
 			n, err := value.Read(buf)
 			if n > 0 {
 				m.Size += int64(n)
+				if small.Len() < BlockSize {
+					small.Write(buf[:n])
+				}
+				h.Write(buf[:n])
 				bp, err := p.putData(tx, buf[:n])
 				if err != nil {
 					return err
 				}
-				m.Positions = append(m.Positions, bp...)
+				// fmt.Println("write", bp)
+				m.Positions.Append(uint32(bp / BlockSize))
 			}
 			if n == 0 || err == io.EOF {
 				break
@@ -246,10 +212,20 @@ func (p *Package) Write(key string, value io.Reader) error {
 			}
 		}
 
+		if m.Size < BlockSize/2 {
+			// Small data
+			if err := m.Positions.Free(tx); err != nil {
+				return err
+			}
+			m.SmallData = small.Bytes()
+			m.Positions = nil
+		}
+
 		if err := p.incTotalSize(tx, m.Size, 1); err != nil {
 			return err
 		}
 		// fmt.Println(m.Positions)
+		copy(m.Sha1[:], h.Sum(nil))
 		return bk.Put(keybuf, m.marshal())
 	})
 }
@@ -263,12 +239,7 @@ func (p *Package) Delete(key string) error {
 			return nil
 		}
 		m := unmarshalMeta(metabuf)
-		for _, bp := range m.Positions {
-			if err := bp.putIntoHole(tx); err != nil {
-				return err
-			}
-		}
-		if err := p.compactHoles(tx); err != nil {
+		if err := m.Positions.Free(tx); err != nil {
 			return err
 		}
 		if err := p.incTotalSize(tx, -m.Size, -1); err != nil {
@@ -323,25 +294,12 @@ func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
 	return nil
 }
 
-func (p *Package) Stat() (totalSize int64, totalCount int64, holes map[string]int64) {
+func (p *Package) Stat() (totalSize, totalCount, freeBlocks int64) {
 	p.db.View(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
 		totalSize = bytesToInt64(bk.Get(totalSizeKey))
 		totalCount = bytesToInt64(bk.Get(totalCountKey))
-		holes = map[string]int64{}
-		for s := BlockSize_1K; s <= BlockSize_16M; s *= 2 {
-			c := tx.Bucket([]byte("holes_" + strconv.Itoa(s))).Cursor()
-			x := int64(0)
-			k, _ := c.First()
-			last := ""
-			for ; len(k) == 8; k, _ = c.Next() {
-				last = unmarshalBlockPos(k).String()
-				x++
-			}
-			if last != "" {
-				holes[last] = x
-			}
-		}
+		freeBlocks = int64(tx.Bucket(freeBucket).Stats().KeyN)
 		return nil
 	})
 	return
