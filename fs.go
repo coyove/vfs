@@ -90,7 +90,7 @@ func (p *Package) putData(tx *bbolt.Tx, buf []byte) (int64, error) {
 	if k, _ := bk.Cursor().First(); len(k) == 4 {
 		boff := bytesToUint32(k)
 		off := int64(boff) * BlockSize
-		if err := deleteFromHole(tx, boff); err != nil {
+		if err := allocBlock(tx, boff); err != nil {
 			return 0, err
 		}
 		return off, p.writeData(buf, off, false)
@@ -105,7 +105,7 @@ func (p *Package) putData(tx *bbolt.Tx, buf []byte) (int64, error) {
 }
 
 func (p *Package) ReadAll(key string) ([]byte, error) {
-	r, err := p.Read(key)
+	r, err := p.Open(key)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (p *Package) Meta(key string) (Meta, error) {
 	return m, err
 }
 
-func (p *Package) Read(key string) (io.ReadCloser, error) {
+func (p *Package) Open(key string) (io.ReadCloser, error) {
 	m, err := p.Meta(key)
 	if err != nil {
 		return nil, err
@@ -155,7 +155,7 @@ func (p *Package) Read(key string) (io.ReadCloser, error) {
 		}
 		return nil
 	})
-	return &ReadCloser{io.MultiReader(readers...), f}, nil
+	return &ReadCloser{io.MultiReader(readers...), m.Size, readers, f}, nil
 }
 
 func (p *Package) Write(key string, value io.Reader) error {
@@ -182,6 +182,10 @@ func (p *Package) Write(key string, value io.Reader) error {
 				}
 			}()
 			// Write data to new blocks, then recycle old blocks in the above defer-call
+		}
+
+		if max := bytesToInt64(bk.Get(maxSizeKey)); max > 0 && bytesToInt64(bk.Get(totalSizeKey)) > max {
+			return fmt.Errorf("package max size reached: %v", max)
 		}
 
 		buf, clean := bigBuffer()
@@ -271,7 +275,7 @@ func (p *Package) Rename(oldname, newname string) error {
 }
 
 func (p *Package) Copy(from, to string) error {
-	f, err := p.Read(from)
+	f, err := p.Open(from)
 	if err != nil {
 		return err
 	}
@@ -313,7 +317,7 @@ func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
 			if strings.HasPrefix(sk, "*:") {
 				continue
 			}
-			r, err := p.Read(sk)
+			r, err := p.Open(sk)
 			if err != nil {
 				return err
 			}
@@ -325,4 +329,25 @@ func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
 		}
 		return nil
 	})
+}
+
+func (p *Package) SetMaxSize(v int64) error {
+	return p.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(trunkBucket).Put(maxSizeKey, int64ToBytes(v))
+	})
+}
+
+func (p *Package) ListAll() (names []string, err error) {
+	err = p.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket(trunkBucket).Cursor()
+		for k, _ := c.First(); len(k) > 0; k, _ = c.Next() {
+			sk := string(k)
+			if strings.HasPrefix(sk, "*:") {
+				continue
+			}
+			names = append(names, sk)
+		}
+		return nil
+	})
+	return
 }

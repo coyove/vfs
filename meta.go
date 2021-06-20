@@ -90,13 +90,13 @@ func (b Blocks) String() string {
 }
 
 func (b Blocks) Free(tx *bbolt.Tx) error {
-	return b.ForEach(func(v uint32) error { return putIntoHole(tx, v) })
+	return b.ForEach(func(v uint32) error { return freeBlock(tx, v) })
 }
 
-func putIntoHole(tx *bbolt.Tx, v uint32) error {
+func freeBlock(tx *bbolt.Tx, v uint32) error {
 	return tx.Bucket(freeBucket).Put(uint32ToBytes(v), []byte{})
 }
 
-func deleteFromHole(tx *bbolt.Tx, v uint32) error {
+func allocBlock(tx *bbolt.Tx, v uint32) error {
 	return tx.Bucket(freeBucket).Delete(uint32ToBytes(v))
 }

@@ -9,5 +9,6 @@ var (
 	freeBucket    = []byte("free")
 	dataSizeKey   = []byte("*:data")
 	totalSizeKey  = []byte("*:size")
+	maxSizeKey    = []byte("*:maxsize")
 	totalCountKey = []byte("*:count")
 )

@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -33,7 +34,18 @@ type Reader struct {
 
 type ReadCloser struct {
 	io.Reader
-	f *os.File
+	sz  int64
+	rds []io.Reader
+	f   *os.File
+}
+
+func (r *ReadCloser) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case 0:
+	case 1:
+	case 2:
+	}
+	return 0, fmt.Errorf("invalid whence")
 }
 
 func (r *ReadCloser) Close() error {

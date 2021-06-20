@@ -24,7 +24,7 @@ func (p *Package) calcTruncate(tx *bbolt.Tx) (int64, error) {
 		h := int64(boff)*BlockSize + BlockSize
 		if h == eof {
 			eof -= BlockSize
-			if err := deleteFromHole(tx, boff); err != nil {
+			if err := allocBlock(tx, boff); err != nil {
 				return 0, err
 			}
 			continue
