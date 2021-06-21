@@ -80,16 +80,10 @@ func run(t *testing.T, v int) {
 	}
 
 	if true {
-		trashed := []string{}
 		for k := range m {
 			if rand.Intn(2) == 0 {
-				if rand.Intn(2) == 0 {
-					p.Delete(k, true)
-					trashed = append(trashed, k)
-				} else {
-					delete(m, k)
-					p.Delete(k, false)
-				}
+				delete(m, k)
+				p.Delete(k)
 			} else {
 				if fmt.Sprint(p.Copy(k, k+"copy")) != "testable" {
 					m[k+"copy"] = 1
@@ -99,10 +93,6 @@ func run(t *testing.T, v int) {
 			if rand.Intn(len(m)/4+1) == 0 {
 				break
 			}
-		}
-
-		for _, k := range trashed {
-			p.Restore(k)
 		}
 
 		for _, i := range rand.Perm(15) {

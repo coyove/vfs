@@ -9,14 +9,16 @@ const (
 var (
 	trunkBucket = []byte("trunk")
 	freeBucket  = []byte("free")
-	trashBucket = []byte("trash")
 
 	dataSizeKey   = []byte("*:data")
 	dataFileKey   = []byte("*:datafile")
 	totalSizeKey  = []byte("*:size")
 	maxSizeKey    = []byte("*:maxsize")
 	totalCountKey = []byte("*:count")
+)
 
+var (
+	ErrAbort       = fmt.Errorf("abort loop")
 	ErrInvalidName = fmt.Errorf("invalid name")
 	ErrNotFound    = fmt.Errorf("not found")
 )

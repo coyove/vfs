@@ -32,10 +32,6 @@ func Open(path string) (*Package, error) {
 	dataFileHash := ""
 	dataFileMinSize := int64(0)
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists(trashBucket); err != nil {
-			return err
-		}
-
 		trunk, err := tx.CreateBucketIfNotExists(trunkBucket)
 		if err != nil {
 			return err
@@ -218,7 +214,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			// Overwrite existing data
 			old := unmarshalMeta(metabuf)
 			m.CreateTime = old.CreateTime
-			if err := p.incTotalSize(tx, trunkBucket, -old.Size, -1); err != nil {
+			if err := p.incTotalSize(tx, -old.Size, -1); err != nil {
 				return err
 			}
 			defer func() {
@@ -270,7 +266,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			m.Positions = nil
 		}
 
-		if err := p.incTotalSize(tx, trunkBucket, m.Size, 1); err != nil {
+		if err := p.incTotalSize(tx, m.Size, 1); err != nil {
 			return err
 		}
 		// fmt.Println(m.Positions)
@@ -279,29 +275,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 	})
 }
 
-func (p *Package) Restore(key string) error {
-	keybuf := []byte(key)
-	return p.db.Update(func(tx *bbolt.Tx) error {
-		bk := tx.Bucket(trashBucket)
-		metabuf := bk.Get(keybuf)
-		if len(metabuf) == 0 {
-			return ErrNotFound
-		}
-		m := unmarshalMeta(metabuf)
-		if err := p.incTotalSize(tx, trunkBucket, m.Size, 1); err != nil {
-			return err
-		}
-		if err := p.incTotalSize(tx, trashBucket, -m.Size, -1); err != nil {
-			return err
-		}
-		if err := bk.Delete(keybuf); err != nil {
-			return err
-		}
-		return tx.Bucket(trunkBucket).Put(keybuf, metabuf)
-	})
-}
-
-func (p *Package) Delete(key string, trash bool) error {
+func (p *Package) Delete(key string) error {
 	keybuf := []byte(key)
 	return p.db.Update(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
@@ -310,19 +284,10 @@ func (p *Package) Delete(key string, trash bool) error {
 			return ErrNotFound
 		}
 		m := unmarshalMeta(metabuf)
-		if trash {
-			if err := tx.Bucket(trashBucket).Put(keybuf, metabuf); err != nil {
-				return err
-			}
-			if err := p.incTotalSize(tx, trashBucket, m.Size, 1); err != nil {
-				return err
-			}
-		} else {
-			if err := m.Positions.Free(tx); err != nil {
-				return err
-			}
+		if err := m.Positions.Free(tx); err != nil {
+			return err
 		}
-		if err := p.incTotalSize(tx, trunkBucket, -m.Size, -1); err != nil {
+		if err := p.incTotalSize(tx, -m.Size, -1); err != nil {
 			return err
 		}
 		return bk.Delete(keybuf)
@@ -360,8 +325,8 @@ func (p *Package) Copy(from, to string) error {
 	return p.Write(to, f)
 }
 
-func (p *Package) incTotalSize(tx *bbolt.Tx, bkName []byte, sz, cnt int64) error {
-	bk := tx.Bucket(bkName)
+func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
+	bk := tx.Bucket(trunkBucket)
 	if sz != 0 {
 		if err := bk.Put(totalSizeKey, int64ToBytes(bytesToInt64(bk.Get(totalSizeKey))+sz)); err != nil {
 			return err
@@ -400,6 +365,9 @@ func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
 			}
 			if err := f(unmarshalMeta(v), r); err != nil {
 				r.Close()
+				if err == ErrAbort {
+					return nil
+				}
 				return err
 			}
 			r.Close()
@@ -415,16 +383,8 @@ func (p *Package) SetMaxSize(v int64) error {
 }
 
 func (p *Package) ListAll(prefix string) (names []Meta, err error) {
-	return p.listAll(prefix, trunkBucket)
-}
-
-func (p *Package) ListAllTrash(prefix string) (names []Meta, err error) {
-	return p.listAll(prefix, trashBucket)
-}
-
-func (p *Package) listAll(prefix string, bkName []byte) (names []Meta, err error) {
 	err = p.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(bkName).Cursor()
+		c := tx.Bucket(trunkBucket).Cursor()
 		for k, v := c.First(); len(k) > 0; k, v = c.Next() {
 			sk := string(k)
 			if !strings.HasPrefix(sk, "*:") && strings.HasPrefix(sk, prefix) {
