@@ -5,11 +5,11 @@ if [ "$END" = "" ]; then
 fi
 echo test $END times
 
-go test -c  -o test_exec
+go test -c -o test_exec
 
 for i in $(seq 1 $END); do
     echo '#' $i
-    ./test_exec | grep -i fail
+    ./test_exec -test.run Const | grep -i fail
 
     if [ $(python3 -c 'import random; print(random.randint(0, 2))') = "0" ]; then
         echo 'delete'

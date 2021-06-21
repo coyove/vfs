@@ -119,7 +119,7 @@ func checkName(s string) bool {
 		for _, r := range s {
 			size++
 			switch r {
-			case '/', '*', '?', '\\', ':', '"', '<', '>', '|':
+			case '/', '*', '?', '\\', '"', '<', '>', '|':
 				return false
 			case '.':
 				dots++
@@ -130,7 +130,10 @@ func checkName(s string) bool {
 		}
 		return true
 	}
-	s = strings.TrimPrefix(s, "/")
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	s = s[1:]
 	for _, p := range strings.Split(s, "/") {
 		if !valid(p) {
 			return false

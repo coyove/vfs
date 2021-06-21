@@ -3,7 +3,8 @@ package vfs
 import "fmt"
 
 const (
-	BlockSize = 1024 * 128
+	BlockSize      = 1024 * 128
+	SmallBlockSize = 1024 * 2
 )
 
 var (
@@ -13,7 +14,6 @@ var (
 	dataSizeKey   = []byte("*:data")
 	dataFileKey   = []byte("*:datafile")
 	totalSizeKey  = []byte("*:size")
-	maxSizeKey    = []byte("*:maxsize")
 	totalCountKey = []byte("*:count")
 )
 

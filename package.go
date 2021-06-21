@@ -18,8 +18,9 @@ import (
 var testFlagSimulateDataWriteError = 0
 
 type Package struct {
-	db   *bbolt.DB
-	data *os.File
+	dbpath string
+	db     *bbolt.DB
+	data   *os.File
 }
 
 func Open(path string) (*Package, error) {
@@ -36,9 +37,7 @@ func Open(path string) (*Package, error) {
 		if err != nil {
 			return err
 		}
-
 		dataFileMinSize = bytesToInt64(trunk.Get(dataSizeKey))
-
 		h := trunk.Get(dataFileKey)
 		if len(h) != 8 {
 			h = random(8)
@@ -65,17 +64,18 @@ func Open(path string) (*Package, error) {
 	}
 
 	p := &Package{
-		db:   db,
-		data: f,
+		db:     db,
+		dbpath: path,
+		data:   f,
 	}
 	return p, p.Compact()
 }
 
 func (p *Package) Close() error {
-	if err := p.db.Close(); err != nil {
-		return err
+	if err1, err2 := p.db.Close(), p.data.Close(); err1 != nil || err2 != nil {
+		return fmt.Errorf("close package: %v or %v", err1, err2)
 	}
-	return p.data.Close()
+	return nil
 }
 
 func (p *Package) writeData(buf []byte, off int64, padSize bool) error {
@@ -135,7 +135,10 @@ func (p *Package) ReadAll(key string) ([]byte, error) {
 	return ioutil.ReadAll(r)
 }
 
-func (p *Package) Meta(key string) (m Meta, err error) {
+func (p *Package) Info(key string) (m Meta, err error) {
+	if !checkName(key) {
+		return m, ErrInvalidName
+	}
 	keybuf := []byte(key)
 	err = p.db.View(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
@@ -150,7 +153,7 @@ func (p *Package) Meta(key string) (m Meta, err error) {
 }
 
 func (p *Package) Open(key string) (*File, error) {
-	m, err := p.Meta(key)
+	m, err := p.Info(key)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +177,7 @@ func (p *Package) Open(key string) (*File, error) {
 
 func (p *Package) UpdateTags(key string, f func(map[string]string) error) error {
 	return p.db.Update(func(tx *bbolt.Tx) error {
-		m, err := p.Meta(key)
+		m, err := p.Info(key)
 		if err != nil {
 			return err
 		}
@@ -225,20 +228,24 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			// Write data to new blocks, then recycle old blocks in the above defer-call
 		}
 
-		if max := bytesToInt64(bk.Get(maxSizeKey)); max > 0 && bytesToInt64(bk.Get(totalSizeKey)) > max {
-			return fmt.Errorf("package max size reached: %v", max)
-		}
-
 		buf, clean := bigBuffer()
 		small := bytes.Buffer{}
 		h := sha1.New()
-		defer clean()
+		beforeEOF := bytesToInt64(bk.Get(dataSizeKey))
+
+		defer func() {
+			if E != nil {
+				// If encountered error, data file may be appended with unwanted bytes already
+				bk.Put(dataSizeKey, int64ToBytes(beforeEOF))
+			}
+			clean()
+		}()
 
 		for {
 			n, err := value.Read(buf)
 			if n > 0 {
 				m.Size += int64(n)
-				if small.Len() < BlockSize {
+				if small.Len() < SmallBlockSize {
 					small.Write(buf[:n])
 				}
 				h.Write(buf[:n])
@@ -257,8 +264,8 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			}
 		}
 
-		if m.Size < BlockSize/2 {
-			// Small data
+		if m.Size < SmallBlockSize {
+			// Store small data outside data file to reduce fragments
 			if err := m.Positions.Free(tx); err != nil {
 				return err
 			}
@@ -276,43 +283,37 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 }
 
 func (p *Package) Delete(key string) error {
-	keybuf := []byte(key)
 	return p.db.Update(func(tx *bbolt.Tx) error {
-		bk := tx.Bucket(trunkBucket)
-		metabuf := bk.Get(keybuf)
-		if len(metabuf) == 0 {
-			return ErrNotFound
+		m, err := p.Info(key)
+		if err != nil {
+			return err
 		}
-		m := unmarshalMeta(metabuf)
 		if err := m.Positions.Free(tx); err != nil {
 			return err
 		}
 		if err := p.incTotalSize(tx, -m.Size, -1); err != nil {
 			return err
 		}
-		return bk.Delete(keybuf)
+		return tx.Bucket(trunkBucket).Delete([]byte(key))
 	})
 }
 
 func (p *Package) Rename(oldname, newname string) error {
-	if !checkName(newname) {
-		return ErrInvalidName
-	}
 	return p.db.Update(func(tx *bbolt.Tx) error {
-		m, err := p.Meta(oldname)
+		old, err := p.Info(oldname)
 		if err != nil {
 			return err
 		}
-		if m.Name == newname {
-			return fmt.Errorf("rename: new name already occupied")
+		if _, err := p.Info(newname); err != ErrNotFound {
+			return fmt.Errorf("rename: new name error: %v", err)
 		}
 
-		m.Name = newname
+		old.Name = newname
 		bk := tx.Bucket(trunkBucket)
 		if err := bk.Delete([]byte(oldname)); err != nil {
 			return err
 		}
-		return bk.Put([]byte(newname), m.marshal())
+		return bk.Put([]byte(newname), old.marshal())
 	})
 }
 
@@ -327,25 +328,40 @@ func (p *Package) Copy(from, to string) error {
 
 func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
 	bk := tx.Bucket(trunkBucket)
-	if sz != 0 {
-		if err := bk.Put(totalSizeKey, int64ToBytes(bytesToInt64(bk.Get(totalSizeKey))+sz)); err != nil {
-			return err
-		}
+	if err := bk.Put(totalSizeKey, int64ToBytes(bytesToInt64(bk.Get(totalSizeKey))+sz)); err != nil {
+		return err
 	}
-	if cnt != 0 {
-		if err := bk.Put(totalCountKey, int64ToBytes(bytesToInt64(bk.Get(totalCountKey))+cnt)); err != nil {
-			return err
-		}
+	if err := bk.Put(totalCountKey, int64ToBytes(bytesToInt64(bk.Get(totalCountKey))+cnt)); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (p *Package) Stat() (totalSize, totalCount, freeBlocks int64) {
+// Size returns 2 values: used bytes in database, and actual bytes on disk
+func (p *Package) Size() (sz, diskSize int64) {
+	diskSize, _ = p.data.Seek(0, 2)
+	if fi, _ := os.Stat(p.dbpath); fi != nil {
+		diskSize += fi.Size()
+	}
 	p.db.View(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
-		totalSize = bytesToInt64(bk.Get(totalSizeKey))
-		totalCount = bytesToInt64(bk.Get(totalCountKey))
-		freeBlocks = int64(tx.Bucket(freeBucket).Stats().KeyN)
+		sz = bytesToInt64(bk.Get(totalSizeKey))
+		return nil
+	})
+	return
+}
+
+func (p *Package) Count() (c int64) {
+	p.db.View(func(tx *bbolt.Tx) error {
+		c = bytesToInt64(tx.Bucket(trunkBucket).Get(totalCountKey))
+		return nil
+	})
+	return
+}
+
+func (p *Package) FreeBlocks() (frees int64) {
+	p.db.View(func(tx *bbolt.Tx) error {
+		frees = int64(tx.Bucket(freeBucket).Stats().KeyN)
 		return nil
 	})
 	return
@@ -376,19 +392,71 @@ func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
 	})
 }
 
-func (p *Package) SetMaxSize(v int64) error {
-	return p.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(trunkBucket).Put(maxSizeKey, int64ToBytes(v))
-	})
-}
-
-func (p *Package) ListAll(prefix string) (names []Meta, err error) {
+func (p *Package) Search(name string, max int) (names []Meta, err error) {
 	err = p.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(trunkBucket).Cursor()
-		for k, v := c.First(); len(k) > 0; k, v = c.Next() {
+		for k, v := c.First(); len(k) > 0 && len(names) < max; k, v = c.Next() {
 			sk := string(k)
-			if !strings.HasPrefix(sk, "*:") && strings.HasPrefix(sk, prefix) {
+			if strings.HasPrefix(sk, "*:") {
+				continue
+			}
+			if strings.Contains(sk, name) {
 				names = append(names, unmarshalMeta(v))
+			}
+		}
+		return nil
+	})
+	return
+}
+
+// 				d := Dir{
+// 					Name:       path + suffix[:idx+1],
+// 					Size:       gjson.GetBytes(v, "sz").Int(),
+// 					Count:      1,
+// 					CreateTime: gjson.GetBytes(v, "ct").Int(),
+// 					ModTime:    gjson.GetBytes(v, "mt").Int(),
+// 				}
+// 				for {
+// 					k, v = c.Next()
+// 					if strings.HasPrefix(*(*string)(unsafe.Pointer(&k)), d.Name) {
+// 						d.Size += gjson.GetBytes(v, "sz").Int()
+// 						d.Count++
+// 						ct := gjson.GetBytes(v, "ct").Int()
+// 						mt := gjson.GetBytes(v, "mt").Int()
+// 						if ct < d.CreateTime {
+// 							d.CreateTime = ct
+// 						}
+// 						if mt > d.ModTime {
+// 							d.ModTime = mt
+// 						}
+// 						continue
+// 					}
+// 					c.Prev()
+// 					break
+// 				}
+// 				names = append(names, d)
+
+func (p *Package) List(path string) (names []interface{}, err error) {
+	path = strings.TrimSuffix(path, "/") + "/"
+	err = p.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket(trunkBucket).Cursor()
+		for k, v := c.Seek([]byte(path)); len(k) > 0; {
+			sk := string(k)
+			if strings.HasPrefix(sk, "*:") {
+				k, v = c.Next()
+				continue
+			}
+			if !strings.HasPrefix(sk, path) {
+				break
+			}
+			suffix := sk[len(path):]
+			if idx := strings.Index(suffix, "/"); idx > -1 {
+				d := Dir{Name: path + suffix[:idx+1]}
+				names = append(names, d)
+				k, v = c.Seek([]byte(d.Name + "\xff"))
+			} else {
+				names = append(names, unmarshalMeta(v))
+				k, v = c.Next()
 			}
 		}
 		return nil

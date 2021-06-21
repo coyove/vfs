@@ -5,25 +5,27 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 )
 
 func write(name string, buf []byte) {
-	ioutil.WriteFile("test/"+name, buf, 0777)
+	ioutil.WriteFile("test"+name, buf, 0777)
 }
 
 func read(name string) (buf []byte) {
-	buf, _ = ioutil.ReadFile("test/" + name)
+	buf, _ = ioutil.ReadFile("test" + name)
 	return
 }
 
 func hash(name string) [sha1.Size]byte {
-	buf, _ := ioutil.ReadFile("test/" + name)
+	buf, _ := ioutil.ReadFile("test" + name)
 	return sha1.Sum(buf)
 }
 
@@ -47,8 +49,7 @@ func run(t *testing.T, v int) {
 	}
 
 	defer p.Close()
-	fmt.Println(p.Stat())
-	fmt.Println(p.ListAll(""))
+	fmt.Println(p.Size())
 
 	// p.WriteAll("/", nil)
 	// p.WriteAll("/tmp/a.txt", nil)
@@ -60,7 +61,7 @@ func run(t *testing.T, v int) {
 	// return
 
 	m := map[string]int{}
-	if key := "zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
+	if key := "/zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
 		write(key, nil)
 		m[key] = 1
 	}
@@ -72,7 +73,7 @@ func run(t *testing.T, v int) {
 		} else {
 			x = random(rand.Intn(1024 * 1024))
 		}
-		key := "zzz" + strconv.Itoa(i)
+		key := "/zzz" + strconv.Itoa(i)
 		if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
 			write(key, x)
 			m[key] = 1
@@ -103,7 +104,7 @@ func run(t *testing.T, v int) {
 			} else {
 				x = random(rand.Intn(4 * 1024 * 1024))
 			}
-			key := "zzz" + strconv.Itoa(i)
+			key := "/zzz" + strconv.Itoa(i)
 			if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
 				write(key, x)
 				m[key] = 1
@@ -120,7 +121,7 @@ func run(t *testing.T, v int) {
 			t.Fatal(k, len(buf1), len(buf2))
 		}
 
-		m, _ := p.Meta(k)
+		m, _ := p.Info(k)
 		if h := hash(k); m.Sha1 != h {
 			t.Fatal(k, m.Sha1, h)
 		}
@@ -156,4 +157,57 @@ func run(t *testing.T, v int) {
 			}
 		}()
 	}
+}
+
+func TestDir(t *testing.T) {
+	p, _ := Open("test")
+	p.WriteAll("/a.txt", []byte("1"))
+	p.WriteAll("/c.txt", []byte("1"))
+	p.WriteAll("/b/a.txt", []byte("1"))
+	p.WriteAll("/b/d.txt", []byte("1"))
+	p.WriteAll("/b/e/1.txt", []byte("1"))
+	p.WriteAll("/b/f.txt", []byte("1"))
+	fmt.Println(p.List("/"))
+	fmt.Println(p.List("/b"))
+}
+
+func TestWalk(t *testing.T) {
+	p, _ := Open("testtmp")
+	hh := map[string][]byte{}
+	total := 0
+	start := time.Now()
+	testFlagSimulateDataWriteError = 0
+	filepath.Walk("/var/", func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		f, _ := os.Open(path)
+		defer f.Close()
+
+		h := sha1.New()
+		if err := p.Write(path, io.TeeReader(f, h)); err != nil {
+			t.Fatal(err, path)
+		}
+		hh[path] = h.Sum(nil)
+		total += int(info.Size())
+		if total > 500*1024*1024 {
+			return ErrAbort
+		}
+		return nil
+	})
+
+	fmt.Println("verify", float64(total)/time.Since(start).Seconds()/1024/1024)
+
+	p.ForEach(func(m Meta, r io.Reader) error {
+		buf, _ := ioutil.ReadAll(r)
+		x := sha1.Sum(buf)
+		if !bytes.Equal(x[:], hh[m.Name]) {
+			t.Fatal(m.Name, x, hh[m.Name])
+		}
+		return nil
+	})
 }

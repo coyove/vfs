@@ -4,8 +4,10 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.etcd.io/bbolt"
 )
@@ -36,6 +38,14 @@ func uint32ToBytes(v uint32) []byte {
 	return b[:]
 }
 
+type Dir struct {
+	Name string
+}
+
+func (d Dir) String() string {
+	return fmt.Sprintf("<%q>", d.Name)
+}
+
 type Meta struct {
 	Name       string            `json:"n"`
 	Size       int64             `json:"sz"`
@@ -56,6 +66,13 @@ func unmarshalMeta(p []byte) Meta {
 func (m Meta) marshal() []byte {
 	buf, _ := json.Marshal(m)
 	return buf
+}
+
+func (m Meta) String() string {
+	return fmt.Sprintf("<%q-%d-%016x-%v-%v-%v>", m.Name, m.Size, m.Sha1[:8], m.Tags,
+		time.Unix(m.CreateTime, 0).Format(time.ANSIC),
+		time.Unix(m.ModTime, 0).Format(time.ANSIC),
+	)
 }
 
 type Blocks []byte
