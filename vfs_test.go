@@ -58,11 +58,11 @@ func run(t *testing.T, v int) {
 	// fmt.Println(p.ListDir("/"))
 	// fmt.Println(p.ListDir("/tmp"))
 	// return
-	iif, _ := os.Open("test.dat")
-	start := time.Now()
-	p.Write("/big", iif)
-	fmt.Println(time.Since(start).Seconds())
-	return
+	// iif, _ := os.Open("test.dat")
+	// start := time.Now()
+	// p.Write("/big", iif)
+	// fmt.Println(time.Since(start).Seconds())
+	// return
 
 	m := map[string]int{}
 	if key := "/zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
@@ -169,10 +169,12 @@ func TestDir(t *testing.T) {
 	p.WriteAll("/c.txt", []byte("1"))
 	p.WriteAll("/b/a.txt", []byte("1"))
 	p.WriteAll("/b/d.txt", []byte("1"))
-	p.WriteAll("/b/e/1.txt", []byte("1"))
-	p.WriteAll("/b/f.txt", []byte("1"))
+	p.WriteAll("/b/e/1.txt", []byte("12"))
+	p.WriteAll("/b/f.txt", []byte("100"))
 	fmt.Println(p.List("/"))
 	fmt.Println(p.List("/b"))
+	fmt.Println(p.Info("/b"))
+	fmt.Println(p.Info("/b/e"))
 }
 
 func TestWalk(t *testing.T) {
@@ -181,7 +183,7 @@ func TestWalk(t *testing.T) {
 	total := 0
 	start := time.Now()
 	testFlagSimulateDataWriteError = 0
-	filepath.Walk("/var/", func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(os.TempDir(), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -198,9 +200,9 @@ func TestWalk(t *testing.T) {
 		}
 		hh[path] = h.Sum(nil)
 		total += int(info.Size())
-		if total > 500*1024*1024 {
-			return ErrAbort
-		}
+		// if total > 500*1024*1024 {
+		// 	return ErrAbort
+		// }
 		return nil
 	})
 
@@ -216,40 +218,23 @@ func TestWalk(t *testing.T) {
 	})
 }
 
-func TestCursor(t *testing.T) {
-	rand.Seed(time.Now().Unix())
+func TestList(t *testing.T) {
+	p, _ := Open("testtmp")
+	fmt.Println(listrec(p, "/"))
+	fmt.Println(p.Info("/Users"))
+	fmt.Println(p.Info("/var"))
+}
 
-	a := FreeBitmap{}
-	a.Free(uint32(32))
-
-	c := FreeBitmapCursor{src: a}
-	for {
-		_, ok := c.Next()
-		if !ok {
-			break
+func listrec(p *Package, root string) int {
+	m, _ := p.List(root)
+	count := 0
+	for _, m := range m {
+		if m.IsDir {
+			count += listrec(p, m.Name)
+		} else {
+			fmt.Println(m.Name)
+			count++
 		}
 	}
-	freed := map[uint32]bool{}
-	for i := 0; i < len(a)*8/2; i++ {
-		v := rand.Uint32() % uint32(len(a)*8)
-		a.Free(v)
-		freed[v] = true
-	}
-
-	c = FreeBitmapCursor{src: a}
-	for {
-		v, ok := c.Next()
-		if !ok {
-			break
-		}
-		if !freed[v] {
-			t.FailNow()
-		}
-		fmt.Println(v)
-	}
-	for _, v := range a {
-		if v != 255 {
-			t.Fatal(a)
-		}
-	}
+	return count
 }

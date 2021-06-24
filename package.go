@@ -31,13 +31,11 @@ func Open(path string) (*Package, error) {
 	}
 
 	dataFileHash := ""
-	dataFileMinSize := int64(0)
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		trunk, err := tx.CreateBucketIfNotExists(trunkBucket)
 		if err != nil {
 			return err
 		}
-		dataFileMinSize = bytesToInt64(trunk.Get(dataSizeKey))
 		h := trunk.Get(dataFileKey)
 		if len(h) != 8 {
 			h = random(8)
@@ -52,18 +50,13 @@ func Open(path string) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	if eof, err := f.Seek(0, 2); err != nil {
-		return nil, err
-	} else if eof < dataFileMinSize {
-		return nil, fmt.Errorf("corrupted data file size: %v, require at least %v", eof, dataFileMinSize)
-	}
 
 	p := &Package{
 		db:     db,
 		dbpath: path,
 		data:   f,
 	}
-	return p, p.Compact()
+	return p, nil
 }
 
 func (p *Package) Close() error {
@@ -103,18 +96,9 @@ func (p *Package) writeData(buf []byte, off int64, padSize bool) error {
 func (p *Package) putData(tx *bbolt.Tx, buf []byte, c *FreeBitmapCursor) (int64, error) {
 	assert(len(buf) <= BlockSize)
 
-	boff, ok := c.Next()
-	if ok {
-		off := int64(boff) * BlockSize
-		return off, p.writeData(buf, off, false)
-	}
-	// No free blocks, create one at the end of data file
-	trunk := tx.Bucket(trunkBucket)
-	eof := bytesToInt64(trunk.Get(dataSizeKey))
-	if err := p.writeData(buf, eof, true); err != nil {
-		return 0, err
-	}
-	return eof, trunk.Put(dataSizeKey, int64ToBytes(eof+BlockSize))
+	boff, newBlock := c.Next()
+	off := int64(boff) * BlockSize
+	return off, p.writeData(buf, off, newBlock)
 }
 
 func (p *Package) ReadAll(key string) ([]byte, error) {
@@ -135,6 +119,13 @@ func (p *Package) Info(key string) (m Meta, err error) {
 		bk := tx.Bucket(trunkBucket)
 		metabuf := bk.Get(keybuf)
 		if len(metabuf) == 0 {
+			count := bytesToInt64(bk.Get([]byte(string(totalCountKey) + key)))
+			if count > 0 {
+				// Is a top level directory
+				size := bytesToInt64(bk.Get([]byte(string(totalSizeKey) + key)))
+				m = Meta{Name: key + "/", IsDir: true, Size: size, Count: count}
+				return nil
+			}
 			return ErrNotFound
 		}
 		m = unmarshalMeta(metabuf)
@@ -208,7 +199,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			// Overwrite existing data
 			old := unmarshalMeta(metabuf)
 			m.CreateTime = old.CreateTime
-			if err := p.incTotalSize(tx, -old.Size, -1); err != nil {
+			if err := p.incTotalSize(tx, key, -old.Size, -1); err != nil {
 				return err
 			}
 			defer func() {
@@ -222,14 +213,17 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		buf, clean := bigBuffer()
 		small := bytes.Buffer{}
 		h := sha1.New()
-		beforeEOF := bytesToInt64(bk.Get(dataSizeKey))
+		beforeEOF, err := p.data.Seek(0, 2)
+		if err != nil {
+			return err
+		}
 
 		defer func() {
+			clean()
 			if E != nil {
 				// If encountered error, data file may be appended with unwanted bytes already
-				bk.Put(dataSizeKey, int64ToBytes(beforeEOF))
+				p.data.Truncate(beforeEOF)
 			}
-			clean()
 		}()
 
 		freeMap := FreeBitmap(append([]byte{}, bk.Get(freeKey)...))
@@ -266,13 +260,14 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			m.Positions = nil
 		}
 
-		if err := p.incTotalSize(tx, m.Size, 1); err != nil {
+		if err := p.incTotalSize(tx, key, m.Size, 1); err != nil {
 			return err
 		}
-		if err := bk.Put(freeKey, freeMap); err != nil {
+		if err := bk.Put(freeKey, c.src); err != nil {
 			return err
 		}
-		// fmt.Println(m.Positions)
+
+		// fmt.Println(m.Name, len(m.Positions))
 		copy(m.Sha1[:], h.Sum(nil))
 		return bk.Put(keybuf, m.marshal())
 	})
@@ -287,7 +282,7 @@ func (p *Package) Delete(key string) error {
 		if err := m.Positions.Free(tx); err != nil {
 			return err
 		}
-		if err := p.incTotalSize(tx, -m.Size, -1); err != nil {
+		if err := p.incTotalSize(tx, key, -m.Size, -1); err != nil {
 			return err
 		}
 		return tx.Bucket(trunkBucket).Delete([]byte(key))
@@ -322,8 +317,22 @@ func (p *Package) Copy(from, to string) error {
 	return p.Write(to, f)
 }
 
-func (p *Package) incTotalSize(tx *bbolt.Tx, sz, cnt int64) error {
+func (p *Package) incTotalSize(tx *bbolt.Tx, name string, sz, cnt int64) error {
 	bk := tx.Bucket(trunkBucket)
+
+	idx := strings.Index(name[1:], "/")
+	if idx > -1 {
+		first := name[:1+idx]
+		key := []byte(string(totalSizeKey) + first)
+		if err := bk.Put(key, int64ToBytes(bytesToInt64(bk.Get(key))+sz)); err != nil {
+			return err
+		}
+		key = []byte(string(totalCountKey) + first)
+		if err := bk.Put(key, int64ToBytes(bytesToInt64(bk.Get(key))+cnt)); err != nil {
+			return err
+		}
+	}
+
 	if err := bk.Put(totalSizeKey, int64ToBytes(bytesToInt64(bk.Get(totalSizeKey))+sz)); err != nil {
 		return err
 	}
@@ -424,10 +433,11 @@ func (p *Package) Search(name string, max int) (names []Meta, err error) {
 // 				}
 // 				names = append(names, d)
 
-func (p *Package) List(path string) (names []interface{}, err error) {
+func (p *Package) List(path string) (names []Meta, err error) {
 	path = strings.TrimSuffix(path, "/") + "/"
 	err = p.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(trunkBucket).Cursor()
+		bk := tx.Bucket(trunkBucket)
+		c := bk.Cursor()
 		for k, v := c.Seek([]byte(path)); len(k) > 0; {
 			sk := string(k)
 			if strings.HasPrefix(sk, "*:") {
@@ -439,7 +449,7 @@ func (p *Package) List(path string) (names []interface{}, err error) {
 			}
 			suffix := sk[len(path):]
 			if idx := strings.Index(suffix, "/"); idx > -1 {
-				d := Dir{Name: path + suffix[:idx+1]}
+				d := Meta{Name: path + suffix[:idx+1], IsDir: true}
 				names = append(names, d)
 				k, v = c.Seek([]byte(d.Name + "\xff"))
 			} else {

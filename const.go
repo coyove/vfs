@@ -10,7 +10,6 @@ const (
 var (
 	trunkBucket = []byte("trunk")
 
-	dataSizeKey   = []byte("*:data")
 	dataFileKey   = []byte("*:datafile")
 	totalSizeKey  = []byte("*:size")
 	totalCountKey = []byte("*:count")

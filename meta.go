@@ -38,14 +38,6 @@ func uint32ToBytes(v uint32) []byte {
 	return b[:]
 }
 
-type Dir struct {
-	Name string
-}
-
-func (d Dir) String() string {
-	return fmt.Sprintf("<%q>", d.Name)
-}
-
 type Meta struct {
 	Name       string            `json:"n"`
 	Size       int64             `json:"sz"`
@@ -55,6 +47,9 @@ type Meta struct {
 	SmallData  []byte            `json:"R"`
 	Sha1       [sha1.Size]byte   `json:"S"`
 	Tags       map[string]string `json:"T"`
+
+	IsDir bool  `json:"-"`
+	Count int64 `json:"-"`
 }
 
 func unmarshalMeta(p []byte) Meta {
@@ -69,6 +64,12 @@ func (m Meta) marshal() []byte {
 }
 
 func (m Meta) String() string {
+	if m.Name == "" {
+		return "<invalid meta>"
+	}
+	if m.IsDir {
+		return fmt.Sprintf("<%q-%d-%d>", m.Name, m.Size, m.Count)
+	}
 	return fmt.Sprintf("<%q-%d-%016x-%v-%v-%v>", m.Name, m.Size, m.Sha1[:8], m.Tags,
 		time.Unix(m.CreateTime, 0).Format(time.ANSIC),
 		time.Unix(m.ModTime, 0).Format(time.ANSIC),
@@ -121,10 +122,10 @@ type FreeBitmap []byte
 
 func (b *FreeBitmap) Free(v uint32) {
 	idx := int(v / 8)
-	for len(*b) <= idx {
-		*b = append(*b, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"...)
+	// assert(len(*b) > idx)
+	if len(*b) > idx {
+		(*b)[idx] &^= 1 << (v % 8)
 	}
-	(*b)[idx] &^= 1 << (v % 8)
 }
 
 type FreeBitmapCursor struct {
@@ -136,12 +137,13 @@ func (f *FreeBitmapCursor) Next() (uint32, bool) {
 	for {
 		idx := f.cursor / 8
 		if idx >= len(f.src) {
-			return 0, false
+			f.src = append(f.src, 1)
+			return uint32(f.cursor), true
 		}
 		if (f.src[idx]>>(f.cursor%8))&1 == 0 {
 			f.src[idx] |= 1 << (f.cursor % 8)
 			f.cursor++
-			return uint32(f.cursor) - 1, true
+			return uint32(f.cursor) - 1, false
 		}
 		f.cursor++
 	}
