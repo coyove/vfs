@@ -108,13 +108,41 @@ func (b Blocks) String() string {
 }
 
 func (b Blocks) Free(tx *bbolt.Tx) error {
-	return b.ForEach(func(v uint32) error { return freeBlock(tx, v) })
+	trunk := tx.Bucket(trunkBucket)
+	m := FreeBitmap(append([]byte{}, trunk.Get(freeKey)...))
+	b.ForEach(func(v uint32) error {
+		m.Free(v)
+		return nil
+	})
+	return trunk.Put(freeKey, m)
 }
 
-func freeBlock(tx *bbolt.Tx, v uint32) error {
-	return tx.Bucket(freeBucket).Put(uint32ToBytes(v), []byte{})
+type FreeBitmap []byte
+
+func (b *FreeBitmap) Free(v uint32) {
+	idx := int(v / 8)
+	for len(*b) <= idx {
+		*b = append(*b, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"...)
+	}
+	(*b)[idx] &^= 1 << (v % 8)
 }
 
-func allocBlock(tx *bbolt.Tx, v uint32) error {
-	return tx.Bucket(freeBucket).Delete(uint32ToBytes(v))
+type FreeBitmapCursor struct {
+	src    FreeBitmap
+	cursor int
+}
+
+func (f *FreeBitmapCursor) Next() (uint32, bool) {
+	for {
+		idx := f.cursor / 8
+		if idx >= len(f.src) {
+			return 0, false
+		}
+		if (f.src[idx]>>(f.cursor%8))&1 == 0 {
+			f.src[idx] |= 1 << (f.cursor % 8)
+			f.cursor++
+			return uint32(f.cursor) - 1, true
+		}
+		f.cursor++
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
-	"io/fs"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -59,6 +58,11 @@ func run(t *testing.T, v int) {
 	// fmt.Println(p.ListDir("/"))
 	// fmt.Println(p.ListDir("/tmp"))
 	// return
+	iif, _ := os.Open("test.dat")
+	start := time.Now()
+	p.Write("/big", iif)
+	fmt.Println(time.Since(start).Seconds())
+	return
 
 	m := map[string]int{}
 	if key := "/zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
@@ -177,7 +181,7 @@ func TestWalk(t *testing.T) {
 	total := 0
 	start := time.Now()
 	testFlagSimulateDataWriteError = 0
-	filepath.Walk("/var/", func(path string, info fs.FileInfo, err error) error {
+	filepath.Walk("/var/", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -210,4 +214,42 @@ func TestWalk(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestCursor(t *testing.T) {
+	rand.Seed(time.Now().Unix())
+
+	a := FreeBitmap{}
+	a.Free(uint32(32))
+
+	c := FreeBitmapCursor{src: a}
+	for {
+		_, ok := c.Next()
+		if !ok {
+			break
+		}
+	}
+	freed := map[uint32]bool{}
+	for i := 0; i < len(a)*8/2; i++ {
+		v := rand.Uint32() % uint32(len(a)*8)
+		a.Free(v)
+		freed[v] = true
+	}
+
+	c = FreeBitmapCursor{src: a}
+	for {
+		v, ok := c.Next()
+		if !ok {
+			break
+		}
+		if !freed[v] {
+			t.FailNow()
+		}
+		fmt.Println(v)
+	}
+	for _, v := range a {
+		if v != 255 {
+			t.Fatal(a)
+		}
+	}
 }

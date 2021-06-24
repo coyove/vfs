@@ -43,12 +43,7 @@ func Open(path string) (*Package, error) {
 			h = random(8)
 		}
 		dataFileHash = hex.EncodeToString(h)
-		if err := trunk.Put(dataFileKey, h); err != nil {
-			return err
-		}
-
-		_, err = tx.CreateBucketIfNotExists(freeBucket)
-		return err
+		return trunk.Put(dataFileKey, h)
 	}); err != nil {
 		return nil, err
 	}
@@ -105,16 +100,12 @@ func (p *Package) writeData(buf []byte, off int64, padSize bool) error {
 	return nil
 }
 
-func (p *Package) putData(tx *bbolt.Tx, buf []byte) (int64, error) {
+func (p *Package) putData(tx *bbolt.Tx, buf []byte, c *FreeBitmapCursor) (int64, error) {
 	assert(len(buf) <= BlockSize)
 
-	bk := tx.Bucket(freeBucket)
-	if k, _ := bk.Cursor().First(); len(k) == 4 {
-		boff := bytesToUint32(k)
+	boff, ok := c.Next()
+	if ok {
 		off := int64(boff) * BlockSize
-		if err := allocBlock(tx, boff); err != nil {
-			return 0, err
-		}
 		return off, p.writeData(buf, off, false)
 	}
 	// No free blocks, create one at the end of data file
@@ -241,6 +232,8 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			clean()
 		}()
 
+		freeMap := FreeBitmap(append([]byte{}, bk.Get(freeKey)...))
+		c := &FreeBitmapCursor{src: freeMap}
 		for {
 			n, err := value.Read(buf)
 			if n > 0 {
@@ -249,7 +242,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 					small.Write(buf[:n])
 				}
 				h.Write(buf[:n])
-				bp, err := p.putData(tx, buf[:n])
+				bp, err := p.putData(tx, buf[:n], c)
 				if err != nil {
 					return err
 				}
@@ -274,6 +267,9 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		}
 
 		if err := p.incTotalSize(tx, m.Size, 1); err != nil {
+			return err
+		}
+		if err := bk.Put(freeKey, freeMap); err != nil {
 			return err
 		}
 		// fmt.Println(m.Positions)
@@ -354,14 +350,6 @@ func (p *Package) Size() (sz, diskSize int64) {
 func (p *Package) Count() (c int64) {
 	p.db.View(func(tx *bbolt.Tx) error {
 		c = bytesToInt64(tx.Bucket(trunkBucket).Get(totalCountKey))
-		return nil
-	})
-	return
-}
-
-func (p *Package) FreeBlocks() (frees int64) {
-	p.db.View(func(tx *bbolt.Tx) error {
-		frees = int64(tx.Bucket(freeBucket).Stats().KeyN)
 		return nil
 	})
 	return

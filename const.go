@@ -9,12 +9,12 @@ const (
 
 var (
 	trunkBucket = []byte("trunk")
-	freeBucket  = []byte("free")
 
 	dataSizeKey   = []byte("*:data")
 	dataFileKey   = []byte("*:datafile")
 	totalSizeKey  = []byte("*:size")
 	totalCountKey = []byte("*:count")
+	freeKey       = []byte("*:free")
 )
 
 var (

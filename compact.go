@@ -17,19 +17,18 @@ func (p *Package) Compact() (err error) {
 }
 
 func (p *Package) calcTruncate(tx *bbolt.Tx) (int64, error) {
-	eof := bytesToInt64(tx.Bucket(trunkBucket).Get(dataSizeKey))
-	c := tx.Bucket(freeBucket).Cursor()
-	for k, _ := c.Last(); len(k) == 4; k, _ = c.Prev() {
-		boff := bytesToUint32(k)
-		h := int64(boff)*BlockSize + BlockSize
-		if h == eof {
-			eof -= BlockSize
-			if err := allocBlock(tx, boff); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		break
-	}
-	return eof, tx.Bucket(trunkBucket).Put(dataSizeKey, int64ToBytes(eof))
+	bk := tx.Bucket(trunkBucket)
+	eof := bytesToInt64(bk.Get(dataSizeKey))
+	x := FreeBitmap(bk.Get(freeKey))
+	// c.cursor = len(c.src) - 1
+	// for {
+	// 	v, ok := c.FindPrev()
+	// 	if !ok {
+	// 		break
+	// 	}
+	// 	if v*BlockSize+BlockSize == eof {
+	// 		eof--
+	// 	}
+	// }
+	return eof, bk.Put(dataSizeKey, int64ToBytes(eof))
 }
