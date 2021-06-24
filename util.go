@@ -6,20 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
-	"sync"
 )
-
-var bigBuffer = func() func() ([]byte, func()) {
-	pool := sync.Pool{
-		New: func() interface{} {
-			return make([]byte, BlockSize)
-		},
-	}
-	return func() ([]byte, func()) {
-		buf := pool.Get().([]byte)
-		return buf, func() { pool.Put(buf) }
-	}
-}()
 
 func random(n int) []byte {
 	buf := make([]byte, n)

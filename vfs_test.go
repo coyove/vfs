@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+func init() {
+	rand.Seed(time.Now().Unix())
+}
+
 func write(name string, buf []byte) {
 	ioutil.WriteFile("test"+name, buf, 0777)
 }
@@ -29,10 +33,6 @@ func hash(name string) [sha1.Size]byte {
 }
 
 func TestConst(t *testing.T) {
-	rand.Seed(time.Now().Unix())
-
-	// bp := NewBlockPos(10, BlockSize_16M)
-	// t.Log(bp.SplitToSize(BlockSize_1K * 4))
 	run(t, 0)
 	run(t, 5)
 }
@@ -49,6 +49,7 @@ func run(t *testing.T, v int) {
 
 	defer p.Close()
 	fmt.Println(p.Size())
+	fmt.Println(p.Count())
 
 	// p.WriteAll("/", nil)
 	// p.WriteAll("/tmp/a.txt", nil)
@@ -171,6 +172,7 @@ func TestDir(t *testing.T) {
 	p.WriteAll("/b/d.txt", []byte("1"))
 	p.WriteAll("/b/e/1.txt", []byte("12"))
 	p.WriteAll("/b/f.txt", []byte("100"))
+	fmt.Println(p.WriteAll("/b", []byte("100")))
 	fmt.Println(p.List("/"))
 	fmt.Println(p.List("/b"))
 	fmt.Println(p.Info("/b"))
@@ -208,7 +210,10 @@ func TestWalk(t *testing.T) {
 
 	fmt.Println("verify", float64(total)/time.Since(start).Seconds()/1024/1024)
 
-	p.ForEach(func(m Meta, r io.Reader) error {
+	p.ForEach("/var", func(m Meta, r io.Reader) error {
+		if hh[m.Name] == nil {
+			return nil
+		}
 		buf, _ := ioutil.ReadAll(r)
 		x := sha1.Sum(buf)
 		if !bytes.Equal(x[:], hh[m.Name]) {

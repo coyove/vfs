@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ type Package struct {
 	dbpath string
 	db     *bbolt.DB
 	data   *os.File
+	buffer []byte // can only be used in a locked environment
 }
 
 func Open(path string) (*Package, error) {
@@ -55,6 +57,7 @@ func Open(path string) (*Package, error) {
 		db:     db,
 		dbpath: path,
 		data:   f,
+		buffer: make([]byte, BlockSize),
 	}
 	return p, nil
 }
@@ -208,9 +211,15 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 				}
 			}()
 			// Write data to new blocks, then recycle old blocks in the above defer-call
+		} else {
+			// Check name collision between file and dir, e.g.: "/a/" and "/a"
+			dirbuf := []byte(key + "/")
+			k, _ := bk.Cursor().Seek(dirbuf)
+			if bytes.HasPrefix(k, dirbuf) {
+				return fmt.Errorf("dir name collision")
+			}
 		}
 
-		buf, clean := bigBuffer()
 		small := bytes.Buffer{}
 		h := sha1.New()
 		beforeEOF, err := p.data.Seek(0, 2)
@@ -219,7 +228,6 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		}
 
 		defer func() {
-			clean()
 			if E != nil {
 				// If encountered error, data file may be appended with unwanted bytes already
 				p.data.Truncate(beforeEOF)
@@ -229,14 +237,14 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		freeMap := FreeBitmap(append([]byte{}, bk.Get(freeKey)...))
 		c := &FreeBitmapCursor{src: freeMap}
 		for {
-			n, err := value.Read(buf)
+			n, err := value.Read(p.buffer)
 			if n > 0 {
 				m.Size += int64(n)
 				if small.Len() < SmallBlockSize {
-					small.Write(buf[:n])
+					small.Write(p.buffer[:n])
 				}
-				h.Write(buf[:n])
-				bp, err := p.putData(tx, buf[:n], c)
+				h.Write(p.buffer[:n])
+				bp, err := p.putData(tx, p.buffer[:n], c)
 				if err != nil {
 					return err
 				}
@@ -356,21 +364,30 @@ func (p *Package) Size() (sz, diskSize int64) {
 	return
 }
 
-func (p *Package) Count() (c int64) {
+func (p *Package) Count() (totalFiles, totalBlocks int64) {
 	p.db.View(func(tx *bbolt.Tx) error {
-		c = bytesToInt64(tx.Bucket(trunkBucket).Get(totalCountKey))
+		totalFiles = bytesToInt64(tx.Bucket(trunkBucket).Get(totalCountKey))
+		totalBlocks = int64(len(tx.Bucket(trunkBucket).Get(freeKey)) * 8)
 		return nil
 	})
 	return
 }
 
-func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
+func (p *Package) ForEach(toplevel string, f func(Meta, io.Reader) error) error {
+	toplevel = strings.TrimSuffix(toplevel, "/") + "/"
 	return p.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(trunkBucket).Cursor()
-		for k, v := c.First(); len(k) > 0; k, v = c.Next() {
+		k, v := c.First()
+		if toplevel != "/" {
+			k, v = c.Seek([]byte(toplevel))
+		}
+		for ; len(k) > 0; k, v = c.Next() {
 			sk := string(k)
 			if strings.HasPrefix(sk, "*:") {
 				continue
+			}
+			if !strings.HasPrefix(sk, toplevel) {
+				break
 			}
 			r, err := p.Open(sk)
 			if err != nil {
@@ -389,49 +406,45 @@ func (p *Package) ForEach(f func(Meta, io.Reader) error) error {
 	})
 }
 
-func (p *Package) Search(name string, max int) (names []Meta, err error) {
+func (p *Package) Search(toplevel, name string, max int) (names []Meta, err error) {
+	toplevel = strings.TrimSuffix(toplevel, "/") + "/"
+	dedup := map[string]bool{}
 	err = p.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(trunkBucket).Cursor()
-		for k, v := c.First(); len(k) > 0 && len(names) < max; k, v = c.Next() {
+		for k, v := c.Seek([]byte(toplevel)); len(k) > 0 && len(names) < max; k, v = c.Next() {
 			sk := string(k)
 			if strings.HasPrefix(sk, "*:") {
 				continue
 			}
+			if !strings.HasPrefix(sk, toplevel) {
+				break
+			}
 			if strings.Contains(sk, name) {
-				names = append(names, unmarshalMeta(v))
+				dir := filepath.Dir(sk)
+				fn := filepath.Base(sk)
+				if strings.Contains(fn, name) {
+					names = append(names, unmarshalMeta(v))
+				} else if strings.Contains(dir, name) {
+					idx := strings.Index(dir, name)       // 1st: /xxx/yyyNAMEyyy/zzz
+					idx2 := strings.Index(dir[idx:], "/") // 2nd: NAMEyyy/zzz
+					if idx2 == -1 {
+						idx = len(dir)
+					} else {
+						idx += idx2
+					}
+					dir = strings.TrimSuffix(dir[:idx], "/") // 3rd: /xxx/yyyNAMEyyy/
+					if dedup[dir] {
+						continue
+					}
+					dedup[dir] = true
+					names = append(names, Meta{Name: dir + "/", IsDir: true})
+				}
 			}
 		}
 		return nil
 	})
 	return
 }
-
-// 				d := Dir{
-// 					Name:       path + suffix[:idx+1],
-// 					Size:       gjson.GetBytes(v, "sz").Int(),
-// 					Count:      1,
-// 					CreateTime: gjson.GetBytes(v, "ct").Int(),
-// 					ModTime:    gjson.GetBytes(v, "mt").Int(),
-// 				}
-// 				for {
-// 					k, v = c.Next()
-// 					if strings.HasPrefix(*(*string)(unsafe.Pointer(&k)), d.Name) {
-// 						d.Size += gjson.GetBytes(v, "sz").Int()
-// 						d.Count++
-// 						ct := gjson.GetBytes(v, "ct").Int()
-// 						mt := gjson.GetBytes(v, "mt").Int()
-// 						if ct < d.CreateTime {
-// 							d.CreateTime = ct
-// 						}
-// 						if mt > d.ModTime {
-// 							d.ModTime = mt
-// 						}
-// 						continue
-// 					}
-// 					c.Prev()
-// 					break
-// 				}
-// 				names = append(names, d)
 
 func (p *Package) List(path string) (names []Meta, err error) {
 	path = strings.TrimSuffix(path, "/") + "/"
