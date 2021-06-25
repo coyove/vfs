@@ -142,6 +142,9 @@ func (p *Package) Open(key string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if m.IsDir {
+		return nil, fmt.Errorf("open: directory")
+	}
 
 	if len(m.SmallData) == int(m.Size) {
 		return &File{size: int64(len(m.SmallData)), small: m.SmallData}, nil
@@ -165,6 +168,9 @@ func (p *Package) UpdateTags(key string, f func(map[string]string) error) error 
 		m, err := p.Info(key)
 		if err != nil {
 			return err
+		}
+		if m.IsDir {
+			return fmt.Errorf("update: directory")
 		}
 		if m.Tags == nil {
 			m.Tags = map[string]string{}
@@ -287,6 +293,9 @@ func (p *Package) Delete(key string) error {
 		if err != nil {
 			return err
 		}
+		if m.IsDir {
+			return fmt.Errorf("delete: directory")
+		}
 		if err := m.Positions.Free(tx); err != nil {
 			return err
 		}
@@ -302,6 +311,9 @@ func (p *Package) Rename(oldname, newname string) error {
 		old, err := p.Info(oldname)
 		if err != nil {
 			return err
+		}
+		if old.IsDir {
+			return fmt.Errorf("rename: directory")
 		}
 		if _, err := p.Info(newname); err != ErrNotFound {
 			return fmt.Errorf("rename: new name error: %v", err)
