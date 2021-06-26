@@ -48,8 +48,7 @@ func run(t *testing.T, v int) {
 	}
 
 	defer p.Close()
-	fmt.Println(p.Size())
-	fmt.Println(p.Count())
+	fmt.Println(p.Stat())
 
 	// iif, _ := os.Open("test.dat")
 	// start := time.Now()

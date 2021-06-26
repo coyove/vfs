@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unsafe"
@@ -56,7 +55,7 @@ func Open(path string) (*Package, error) {
 
 	p := &Package{
 		db:     db,
-		dbpath: path,
+		dbpath: path + ".index",
 		data:   f,
 		buffer: make([]byte, BlockSize),
 	}
@@ -413,127 +412,26 @@ func (p *Package) incTotalSize(tx *bbolt.Tx, name string, sz, cnt int64) error {
 	return nil
 }
 
-// Size returns 2 values: used bytes in database, and actual bytes on disk
-func (p *Package) Size() (sz, diskSize int64) {
-	diskSize, _ = p.data.Seek(0, 2)
+func (p *Package) Stat() (s struct {
+	Size        int64 // Size of all stored files
+	DiskSize    int64 // Actual disk size (index + data)
+	Files       int64 // Total number of files
+	AllocBlocks int64 // Total allocated blocks
+	DataFile    string
+	IndexFile   string
+}) {
+	s.DiskSize, _ = p.data.Seek(0, 2)
 	if fi, _ := os.Stat(p.dbpath); fi != nil {
-		diskSize += fi.Size()
+		s.DiskSize += fi.Size()
 	}
 	p.db.View(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
-		sz = bytesToInt64(bk.Get(totalSizeKey))
+		s.Size = bytesToInt64(bk.Get(totalSizeKey))
+		s.Files = bytesToInt64(bk.Get(totalCountKey))
+		s.AllocBlocks = int64(len(bk.Get(freeKey)) * 8)
 		return nil
 	})
-	return
-}
-
-func (p *Package) Count() (totalFiles, totalBlocks int64) {
-	p.db.View(func(tx *bbolt.Tx) error {
-		totalFiles = bytesToInt64(tx.Bucket(trunkBucket).Get(totalCountKey))
-		totalBlocks = int64(len(tx.Bucket(trunkBucket).Get(freeKey)) * 8)
-		return nil
-	})
-	return
-}
-
-func (p *Package) ForEach(toplevel string, f func(Meta, io.Reader) error) error {
-	toplevel = strings.TrimSuffix(toplevel, "/") + "/"
-	return p.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(trunkBucket).Cursor()
-		k, v := c.First()
-		if toplevel != "/" {
-			k, v = c.Seek([]byte(toplevel))
-		}
-		for ; len(k) > 0; k, v = c.Next() {
-			sk := string(k)
-			if strings.HasPrefix(sk, "*:") {
-				continue
-			}
-			if !strings.HasPrefix(sk, toplevel) {
-				break
-			}
-			r, err := p.Open(sk)
-			if err != nil {
-				return err
-			}
-			if err := f(unmarshalMeta(v), r); err != nil {
-				r.Close()
-				if err == ErrAbort {
-					return nil
-				}
-				return err
-			}
-			r.Close()
-		}
-		return nil
-	})
-}
-
-func (p *Package) Search(toplevel, name string, max int) (names []Meta, err error) {
-	toplevel = strings.TrimSuffix(toplevel, "/") + "/"
-	dedup := map[string]bool{}
-	err = p.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(trunkBucket).Cursor()
-		for k, v := c.Seek([]byte(toplevel)); len(k) > 0 && len(names) < max; k, v = c.Next() {
-			sk := string(k)
-			if strings.HasPrefix(sk, "*:") {
-				continue
-			}
-			if !strings.HasPrefix(sk, toplevel) {
-				break
-			}
-			if strings.Contains(sk, name) {
-				dir := filepath.Dir(sk)
-				fn := filepath.Base(sk)
-				if strings.Contains(fn, name) {
-					names = append(names, unmarshalMeta(v))
-				} else if strings.Contains(dir, name) {
-					idx := strings.Index(dir, name)       // 1st: /xxx/yyyNAMEyyy/zzz
-					idx2 := strings.Index(dir[idx:], "/") // 2nd: NAMEyyy/zzz
-					if idx2 == -1 {
-						idx = len(dir)
-					} else {
-						idx += idx2
-					}
-					dir = strings.TrimSuffix(dir[:idx], "/") // 3rd: /xxx/yyyNAMEyyy/
-					if dedup[dir] {
-						continue
-					}
-					dedup[dir] = true
-					names = append(names, Meta{Name: dir + "/", IsDir: true})
-				}
-			}
-		}
-		return nil
-	})
-	return
-}
-
-func (p *Package) List(path string) (names []Meta, err error) {
-	path = strings.TrimSuffix(path, "/") + "/"
-	err = p.db.View(func(tx *bbolt.Tx) error {
-		bk := tx.Bucket(trunkBucket)
-		c := bk.Cursor()
-		for k, v := c.Seek([]byte(path)); len(k) > 0; {
-			sk := string(k)
-			if strings.HasPrefix(sk, "*:") {
-				k, v = c.Next()
-				continue
-			}
-			if !strings.HasPrefix(sk, path) {
-				break
-			}
-			suffix := sk[len(path):]
-			if idx := strings.Index(suffix, "/"); idx > -1 {
-				d := Meta{Name: path + suffix[:idx+1], IsDir: true}
-				names = append(names, d)
-				k, v = c.Seek([]byte(d.Name + "\xff"))
-			} else {
-				names = append(names, unmarshalMeta(v))
-				k, v = c.Next()
-			}
-		}
-		return nil
-	})
+	s.DataFile = p.data.Name()
+	s.IndexFile = p.dbpath
 	return
 }
