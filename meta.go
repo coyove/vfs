@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -45,7 +44,7 @@ type Meta struct {
 	CreateTime int64             `json:"ct"`
 	ModTime    int64             `json:"mt"`
 	SmallData  []byte            `json:"R"`
-	Sha1       [sha1.Size]byte   `json:"S"`
+	Crc32      uint32            `json:"crc"`
 	Tags       map[string]string `json:"T"`
 
 	IsDir bool  `json:"-"`
@@ -70,7 +69,7 @@ func (m Meta) String() string {
 	if m.IsDir {
 		return fmt.Sprintf("<%q-%d-%d>", m.Name, m.Size, m.Count)
 	}
-	return fmt.Sprintf("<%q-%d-%016x-%v-%v-%v>", m.Name, m.Size, m.Sha1[:8], m.Tags,
+	return fmt.Sprintf("<%q-%d-%08x-%v-%v-%v>", m.Name, m.Size, m.Crc32, m.Tags,
 		time.Unix(m.CreateTime, 0).Format(time.ANSIC),
 		time.Unix(m.ModTime, 0).Format(time.ANSIC),
 	)

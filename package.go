@@ -2,9 +2,9 @@ package vfs
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -227,7 +227,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		}
 
 		small := bytes.Buffer{}
-		h := sha1.New()
+		h := crc32.NewIEEE()
 		beforeEOF, err := p.data.Seek(0, 2)
 		if err != nil {
 			return err
@@ -282,10 +282,105 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		}
 
 		// fmt.Println(m.Name, len(m.Positions))
-		copy(m.Sha1[:], h.Sum(nil))
+		m.Crc32 = h.Sum32()
 		return bk.Put(keybuf, m.marshal())
 	})
 }
+
+// func (p *Package) Append(key string, value io.Reader) error {
+// 	keybuf := []byte(key)
+// 	return p.db.Update(func(tx *bbolt.Tx) (E error) {
+// 		bk := tx.Bucket(trunkBucket)
+// 		m, err := p.Info(key)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if m.IsDir {
+// 			return fmt.Errorf("append: directory")
+// 		}
+//
+// 		if len(metabuf) > 0 {
+// 			// Overwrite existing data
+// 			old := unmarshalMeta(metabuf)
+// 			m.CreateTime = old.CreateTime
+// 			if err := p.incTotalSize(tx, key, -old.Size, -1); err != nil {
+// 				return err
+// 			}
+// 			defer func() {
+// 				if E == nil {
+// 					E = old.Positions.Free(tx)
+// 				}
+// 			}()
+// 			// Write data to new blocks, then recycle old blocks in the above defer-call
+// 		} else {
+// 			// Check name collision between file and dir, e.g.: "/a/" and "/a"
+// 			dirbuf := []byte(key + "/")
+// 			k, _ := bk.Cursor().Seek(dirbuf)
+// 			if bytes.HasPrefix(k, dirbuf) {
+// 				return fmt.Errorf("dir name collision")
+// 			}
+// 		}
+//
+// 		small := bytes.Buffer{}
+// 		h := crc32.New()
+// 		beforeEOF, err := p.data.Seek(0, 2)
+// 		if err != nil {
+// 			return err
+// 		}
+//
+// 		defer func() {
+// 			if E != nil {
+// 				// If encountered error, data file may be appended with unwanted bytes already
+// 				p.data.Truncate(beforeEOF)
+// 			}
+// 		}()
+//
+// 		freeMap := FreeBitmap(append([]byte{}, bk.Get(freeKey)...))
+// 		c := &FreeBitmapCursor{src: freeMap}
+// 		for {
+// 			n, err := value.Read(p.buffer)
+// 			if n > 0 {
+// 				m.Size += int64(n)
+// 				if small.Len() < SmallBlockSize {
+// 					small.Write(p.buffer[:n])
+// 				}
+// 				h.Write(p.buffer[:n])
+// 				bp, err := p.putData(tx, p.buffer[:n], c)
+// 				if err != nil {
+// 					return err
+// 				}
+// 				// fmt.Println("write", bp)
+// 				m.Positions.Append(uint32(bp / BlockSize))
+// 			}
+// 			if n == 0 || err == io.EOF {
+// 				break
+// 			}
+// 			if err != nil {
+// 				return err
+// 			}
+// 		}
+//
+// 		if m.Size < SmallBlockSize {
+// 			// Store small data outside data file to reduce fragments
+// 			if err := m.Positions.Free(tx); err != nil {
+// 				return err
+// 			}
+// 			m.SmallData = small.Bytes()
+// 			m.Positions = nil
+// 		}
+//
+// 		if err := p.incTotalSize(tx, key, m.Size, 1); err != nil {
+// 			return err
+// 		}
+// 		if err := bk.Put(freeKey, c.src); err != nil {
+// 			return err
+// 		}
+//
+// 		// fmt.Println(m.Name, len(m.Positions))
+// 		copy(m.Sha1[:], h.Sum(nil))
+// 		return bk.Put(keybuf, m.marshal())
+// 	})
+// }
 
 func (p *Package) Delete(key string) error {
 	return p.db.Update(func(tx *bbolt.Tx) error {

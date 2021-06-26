@@ -2,8 +2,8 @@ package vfs
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -27,9 +27,11 @@ func read(name string) (buf []byte) {
 	return
 }
 
-func hash(name string) [sha1.Size]byte {
+func hash(name string) uint32 {
 	buf, _ := ioutil.ReadFile("test" + name)
-	return sha1.Sum(buf)
+	h := crc32.NewIEEE()
+	h.Write(buf)
+	return h.Sum32()
 }
 
 func TestConst(t *testing.T) {
@@ -127,8 +129,8 @@ func run(t *testing.T, v int) {
 		}
 
 		m, _ := p.Info(k)
-		if h := hash(k); m.Sha1 != h {
-			t.Fatal(k, m.Sha1, h)
+		if h := hash(k); m.Crc32 != h {
+			t.Fatal(k, m.Crc32, h)
 		}
 
 	}
@@ -181,7 +183,7 @@ func TestDir(t *testing.T) {
 
 func TestWalk(t *testing.T) {
 	p, _ := Open("testtmp")
-	hh := map[string][]byte{}
+	hh := map[string]uint32{}
 	total := 0
 	start := time.Now()
 	testFlagSimulateDataWriteError = 0
@@ -196,11 +198,11 @@ func TestWalk(t *testing.T) {
 		f, _ := os.Open(path)
 		defer f.Close()
 
-		h := sha1.New()
+		h := crc32.NewIEEE()
 		if err := p.Write(path, io.TeeReader(f, h)); err != nil {
 			t.Fatal(err, path)
 		}
-		hh[path] = h.Sum(nil)
+		hh[path] = h.Sum32()
 		total += int(info.Size())
 		// if total > 500*1024*1024 {
 		// 	return ErrAbort
@@ -211,12 +213,14 @@ func TestWalk(t *testing.T) {
 	fmt.Println("verify", float64(total)/time.Since(start).Seconds()/1024/1024)
 
 	p.ForEach("/var", func(m Meta, r io.Reader) error {
-		if hh[m.Name] == nil {
+		if _, ok := hh[m.Name]; !ok {
 			return nil
 		}
 		buf, _ := ioutil.ReadAll(r)
-		x := sha1.Sum(buf)
-		if !bytes.Equal(x[:], hh[m.Name]) {
+		h := crc32.NewIEEE()
+		h.Write(buf)
+		x := h.Sum32()
+		if x != hh[m.Name] {
 			t.Fatal(m.Name, x, hh[m.Name])
 		}
 		return nil
