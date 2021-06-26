@@ -29,9 +29,7 @@ func read(name string) (buf []byte) {
 
 func hash(name string) uint32 {
 	buf, _ := ioutil.ReadFile("test" + name)
-	h := crc32.NewIEEE()
-	h.Write(buf)
-	return h.Sum32()
+	return crc32.ChecksumIEEE(buf)
 }
 
 func TestConst(t *testing.T) {
@@ -53,14 +51,6 @@ func run(t *testing.T, v int) {
 	fmt.Println(p.Size())
 	fmt.Println(p.Count())
 
-	// p.WriteAll("/", nil)
-	// p.WriteAll("/tmp/a.txt", nil)
-	// p.WriteAll("/tmp/b.txt", nil)
-	// p.WriteAll("/tmp/log/1.log", nil)
-	// p.WriteAll("/2.log", nil)
-	// fmt.Println(p.ListDir("/"))
-	// fmt.Println(p.ListDir("/tmp"))
-	// return
 	// iif, _ := os.Open("test.dat")
 	// start := time.Now()
 	// p.Write("/big", iif)
@@ -73,6 +63,7 @@ func run(t *testing.T, v int) {
 		m[key] = 1
 	}
 
+	appends := map[string][]byte{}
 	for _, i := range rand.Perm(20) {
 		var x []byte
 		if rand.Intn(2) == 1 {
@@ -81,11 +72,33 @@ func run(t *testing.T, v int) {
 			x = random(rand.Intn(1024 * 1024))
 		}
 		key := "/zzz" + strconv.Itoa(i)
+		full := x
+		if len(x) > BlockSize && rand.Intn(2) == 0 {
+			appends[key] = x[BlockSize:]
+			x = x[:BlockSize]
+		}
 		if fmt.Sprint(p.Write(key, bytes.NewReader(x))) != "testable" {
-			write(key, x)
+			write(key, full)
 			m[key] = 1
+		} else {
+			delete(appends, key)
 		}
 	}
+
+	oldFlag := testFlagSimulateDataWriteError
+	for key, x := range appends {
+		fmt.Println("append", key)
+	AGAIN:
+		if err := p.Append(key, bytes.NewReader(x)); err != nil {
+			if fmt.Sprint(err) != "testable" {
+				panic(err)
+			}
+			fmt.Println("append", key, "retry")
+			testFlagSimulateDataWriteError *= 2
+			goto AGAIN
+		}
+	}
+	testFlagSimulateDataWriteError = oldFlag
 
 	if true {
 		for k := range m {
@@ -217,9 +230,7 @@ func TestWalk(t *testing.T) {
 			return nil
 		}
 		buf, _ := ioutil.ReadAll(r)
-		h := crc32.NewIEEE()
-		h.Write(buf)
-		x := h.Sum32()
+		x := crc32.ChecksumIEEE(buf)
 		if x != hh[m.Name] {
 			t.Fatal(m.Name, x, hh[m.Name])
 		}

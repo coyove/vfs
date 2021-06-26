@@ -98,6 +98,14 @@ func (b Blocks) ForEach(f func(v uint32) error) error {
 	return nil
 }
 
+func (b Blocks) Last() (last uint32) {
+	b.ForEach(func(v uint32) error {
+		last = v
+		return nil
+	})
+	return
+}
+
 func (b Blocks) String() string {
 	buf := make([]string, 0, len(b)/2)
 	b.ForEach(func(v uint32) error {
