@@ -57,7 +57,7 @@ func run(t *testing.T, v int) {
 	// return
 
 	m := map[string]int{}
-	if key := "/zero"; fmt.Sprint(p.WriteAll(key, nil)) != "testable" {
+	if key := "/zero"; fmt.Sprint(p.Write(key, nil)) != "testable" {
 		write(key, nil)
 		m[key] = 1
 	}

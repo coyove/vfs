@@ -9,6 +9,14 @@ import (
 )
 
 func (p *Package) ForEach(toplevel string, f func(Meta, io.Reader) error) error {
+	return p.forEachImpl(toplevel, true, func(m Meta, r io.Reader) error { return f(m, r) })
+}
+
+func (p *Package) ForEachMeta(toplevel string, f func(Meta) error) error {
+	return p.forEachImpl(toplevel, false, func(m Meta, r io.Reader) error { return f(m) })
+}
+
+func (p *Package) forEachImpl(toplevel string, reader bool, f func(Meta, io.Reader) error) error {
 	toplevel = strings.TrimSuffix(toplevel, "/") + "/"
 	return p.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(trunkBucket).Cursor()
@@ -24,18 +32,27 @@ func (p *Package) ForEach(toplevel string, f func(Meta, io.Reader) error) error 
 			if !strings.HasPrefix(sk, toplevel) {
 				break
 			}
-			r, err := p.Open(sk)
-			if err != nil {
-				return err
-			}
-			if err := f(unmarshalMeta(v), r); err != nil {
-				r.Close()
-				if err == ErrAbort {
-					return nil
+			if reader {
+				r, err := p.Open(sk)
+				if err != nil {
+					return err
 				}
-				return err
+				if err := f(unmarshalMeta(v), r); err != nil {
+					r.Close()
+					if err == ErrAbort {
+						return nil
+					}
+					return err
+				}
+				r.Close()
+			} else {
+				if err := f(unmarshalMeta(v), nil); err != nil {
+					if err == ErrAbort {
+						return nil
+					}
+					return err
+				}
 			}
-			r.Close()
 		}
 		return nil
 	})

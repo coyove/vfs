@@ -20,4 +20,5 @@ var (
 	ErrAbort       = fmt.Errorf("abort loop")
 	ErrInvalidName = fmt.Errorf("invalid name")
 	ErrNotFound    = fmt.Errorf("not found")
+	ErrIsDirectory = fmt.Errorf("directory operation not permitted")
 )

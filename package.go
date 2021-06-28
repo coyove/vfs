@@ -69,39 +69,35 @@ func (p *Package) Close() error {
 	return nil
 }
 
-func (p *Package) writeData(buf []byte, off int64, padSize bool) error {
+func (p *Package) putData(tx *bbolt.Tx, buf []byte, c *FreeBitmapCursor) (int64, error) {
+	assert(len(buf) <= BlockSize)
+
+	boff, newBlock := c.Next()
+	off := int64(boff) * BlockSize
 	if _, err := p.data.Seek(off, 0); err != nil {
-		return err
+		return 0, err
 	}
 
 	if testFlagSimulateDataWriteError > 0 && rand.Intn(testFlagSimulateDataWriteError) == 0 {
 		x := buf[:rand.Intn(len(buf))]
 		fmt.Println("test flag: simulate data write error, off=", off, "size=", len(buf), "write=", len(x))
 		p.data.Write(x)
-		return fmt.Errorf("testable")
+		return 0, fmt.Errorf("testable")
 	}
 
 	n, err := p.data.Write(buf)
 	if err != nil || n != len(buf) {
-		return fmt.Errorf("write data: %v, written: %v", err, n)
+		return 0, fmt.Errorf("write data: %v, written: %v", err, n)
 	}
 
-	if padSize && n < BlockSize {
+	if newBlock && n < BlockSize {
 		paddings := make([]byte, BlockSize-n)
 		n, err = p.data.Write(paddings)
 		if err != nil || n != len(paddings) {
-			return fmt.Errorf("write paddings: %v, written: %v", err, n)
+			return 0, fmt.Errorf("write paddings: %v, written: %v", err, n)
 		}
 	}
-	return nil
-}
-
-func (p *Package) putData(tx *bbolt.Tx, buf []byte, c *FreeBitmapCursor) (int64, error) {
-	assert(len(buf) <= BlockSize)
-
-	boff, newBlock := c.Next()
-	off := int64(boff) * BlockSize
-	return off, p.writeData(buf, off, newBlock)
+	return off, nil
 }
 
 func (p *Package) ReadAll(key string) ([]byte, error) {
@@ -129,6 +125,12 @@ func (p *Package) Info(key string) (m Meta, err error) {
 				m = Meta{Name: key + "/", IsDir: true, Size: size, Count: count}
 				return nil
 			}
+			dirbuf := []byte(key + "/")
+			k, _ := bk.Cursor().Seek(dirbuf)
+			if bytes.HasPrefix(k, dirbuf) {
+				m = Meta{Name: key + "/", IsDir: true}
+				return nil
+			}
 			return ErrNotFound
 		}
 		m = unmarshalMeta(metabuf)
@@ -143,7 +145,7 @@ func (p *Package) Open(key string) (*File, error) {
 		return nil, err
 	}
 	if m.IsDir {
-		return nil, fmt.Errorf("open: directory")
+		return nil, ErrIsDirectory
 	}
 
 	if len(m.SmallData) == int(m.Size) {
@@ -170,7 +172,7 @@ func (p *Package) UpdateTags(key string, f func(map[string]string) error) error 
 			return err
 		}
 		if m.IsDir {
-			return fmt.Errorf("update: directory")
+			return ErrIsDirectory
 		}
 		if m.Tags == nil {
 			m.Tags = map[string]string{}
@@ -191,7 +193,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 		return ErrInvalidName
 	}
 	if len(kvs)%2 == 1 {
-		return fmt.Errorf("invalid key value pairs")
+		return fmt.Errorf("write: invalid key value pairs")
 	}
 	keybuf := []byte(key)
 	return p.db.Update(func(tx *bbolt.Tx) (E error) {
@@ -222,7 +224,7 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 			dirbuf := []byte(key + "/")
 			k, _ := bk.Cursor().Seek(dirbuf)
 			if bytes.HasPrefix(k, dirbuf) {
-				return fmt.Errorf("dir name collision")
+				return fmt.Errorf("write: directory name collision")
 			}
 		}
 
@@ -268,9 +270,14 @@ func (p *Package) Write(key string, value io.Reader, kvs ...string) error {
 
 func (p *Package) ioCopy(tx *bbolt.Tx, m *Meta, src io.Reader, onRead func([]byte)) (uint32, error) {
 	h := crc32.NewIEEE()
+
+	// equals: h.(*crc32.digest).crc = m.Crc32
 	*(*uint32)((*(*[2]unsafe.Pointer)(unsafe.Pointer(&h)))[1]) = m.Crc32
-	freeMap := FreeBitmap(append([]byte{}, tx.Bucket(trunkBucket).Get(freeKey)...))
-	c := &FreeBitmapCursor{src: freeMap}
+	if src == nil {
+		return h.Sum32(), nil
+	}
+
+	c := &FreeBitmapCursor{src: FreeBitmap(append([]byte{}, tx.Bucket(trunkBucket).Get(freeKey)...))}
 	for {
 		n, err := src.Read(p.buffer)
 		if n > 0 {
@@ -304,7 +311,7 @@ func (p *Package) Append(key string, value io.Reader) error {
 			return err
 		}
 		if m.IsDir {
-			return fmt.Errorf("append: directory")
+			return ErrIsDirectory
 		}
 		if len(m.SmallData) == int(m.Size) {
 			return fmt.Errorf("append: small data not supported")
@@ -344,7 +351,7 @@ func (p *Package) Delete(key string) error {
 			return err
 		}
 		if m.IsDir {
-			return fmt.Errorf("delete: directory")
+			return ErrIsDirectory
 		}
 		if err := m.Positions.Free(tx); err != nil {
 			return err
@@ -356,7 +363,7 @@ func (p *Package) Delete(key string) error {
 	})
 }
 
-func (p *Package) Rename(oldname, newname string, overwrite bool) error {
+func (p *Package) Move(oldname, newname string, overwrite bool) error {
 	return p.db.Update(func(tx *bbolt.Tx) error {
 		bk := tx.Bucket(trunkBucket)
 		old, err := p.Info(oldname)
@@ -364,7 +371,7 @@ func (p *Package) Rename(oldname, newname string, overwrite bool) error {
 			return err
 		}
 		if old.IsDir {
-			return fmt.Errorf("rename: directory")
+			return ErrIsDirectory
 		}
 		if new, err := p.Info(newname); err != ErrNotFound {
 			if err != nil {
