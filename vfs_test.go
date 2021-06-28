@@ -101,15 +101,8 @@ func run(t *testing.T, v int) {
 
 	if true {
 		for k := range m {
-			if rand.Intn(2) == 0 {
-				delete(m, k)
-				p.Delete(k)
-			} else {
-				if fmt.Sprint(p.Copy(k, k+"copy")) != "testable" {
-					m[k+"copy"] = 1
-					write(k+"copy", read(k))
-				}
-			}
+			delete(m, k)
+			p.Delete(k)
 			if rand.Intn(len(m)/4+1) == 0 {
 				break
 			}

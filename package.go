@@ -356,8 +356,9 @@ func (p *Package) Delete(key string) error {
 	})
 }
 
-func (p *Package) Rename(oldname, newname string) error {
+func (p *Package) Rename(oldname, newname string, overwrite bool) error {
 	return p.db.Update(func(tx *bbolt.Tx) error {
+		bk := tx.Bucket(trunkBucket)
 		old, err := p.Info(oldname)
 		if err != nil {
 			return err
@@ -365,26 +366,24 @@ func (p *Package) Rename(oldname, newname string) error {
 		if old.IsDir {
 			return fmt.Errorf("rename: directory")
 		}
-		if _, err := p.Info(newname); err != ErrNotFound {
-			return fmt.Errorf("rename: new name error: %v", err)
+		if new, err := p.Info(newname); err != ErrNotFound {
+			if err != nil {
+				return fmt.Errorf("rename: %v", err)
+			}
+			if !overwrite {
+				return fmt.Errorf("rename: new name existed")
+			}
+			if err := new.Positions.Free(tx); err != nil {
+				return err
+			}
 		}
 
 		old.Name = newname
-		bk := tx.Bucket(trunkBucket)
 		if err := bk.Delete([]byte(oldname)); err != nil {
 			return err
 		}
 		return bk.Put([]byte(newname), old.marshal())
 	})
-}
-
-func (p *Package) Copy(from, to string) error {
-	f, err := p.Open(from)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return p.Write(to, f)
 }
 
 func (p *Package) incTotalSize(tx *bbolt.Tx, name string, sz, cnt int64) error {
